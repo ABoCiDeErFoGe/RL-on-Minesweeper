@@ -24,7 +24,11 @@ class Game:
         
         
     def handle_click(self, x, y):
-       pass
+        # click on the square by their id
+        square_id = f"{y}_{x}"
+        print(f"Clicking on square {square_id}")
+        self.page.locator("#game").locator(f'[id="{square_id}"]').click()
+        return self.get_game_state()
         
     # convert the game to 2d array representation 
        
