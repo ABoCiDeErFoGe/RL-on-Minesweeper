@@ -24,6 +24,10 @@ class Game:
         
         
     def handle_click(self, x, y):
+        
+        if (x < 0 or x > self.w or y < 0 or y > self.h):
+            raise ValueError("Coordinates out of bounds")
+        
         # click on the square by their id
         square_id = f"{y}_{x}"
         print(f"Clicking on square {square_id}")
