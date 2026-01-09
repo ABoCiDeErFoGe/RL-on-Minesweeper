@@ -16,14 +16,40 @@ class Game:
 
     def new_game(self, difficulty: str) -> None:
         """Start a new game on the website and set board dimensions."""
-        if difficulty == "beginner":
+        # normalize difficulty, accept empty string as 'expert'
+        diff = (difficulty or "").lower()
+        if diff == "beginner":
             self.w, self.h = 9, 9
-        elif difficulty == "intermediate":
+        elif diff == "intermediate":
             self.w, self.h = 16, 16
         else:  # expert
+            diff = "expert"
             self.w, self.h = 30, 16
 
-        self.page.goto(f"https://minesweeperonline.com/#{difficulty}")
+        url = f"https://minesweeperonline.com/#{diff}"
+        print(f"Navigating to {url}")
+        # navigate and wait for the game container to be available
+        print("Calling goto...")
+        self.page.goto(url)
+        try:
+            print("Waiting for network to be idle...")
+            self.page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            print("Warning: wait_for_load_state timed out or failed")
+        # Some pages require an explicit reload to pick up the new board state
+        try:
+            print("Reloading page to ensure fresh state...")
+            self.page.reload()
+        except Exception:
+            print("Warning: reload failed or unavailable")
+
+        try:
+            print("Waiting for #game selector...")
+            self.page.wait_for_selector("#game", timeout=10000)
+        except Exception:
+            print("Error: #game selector not found after navigation/reload")
+            # if the selector doesn't appear, raise to signal failure
+            raise
 
     def _check_bounds(self, x: int, y: int) -> None:
         if x < 1 or x > self.w or y < 1 or y > self.h:

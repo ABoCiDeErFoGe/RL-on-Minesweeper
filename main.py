@@ -288,6 +288,46 @@ class App:
         except Exception:
             return
 
+    def _do_new_game(self, difficulty: str):
+        """Run on the Playwright thread: start a new game and return its state."""
+        if not hasattr(self, 'game') or self.game is None:
+            raise RuntimeError("Game not initialized")
+        # difficulty is a string: 'beginner', 'intermediate', or '' for expert
+        self.game.new_game(difficulty)
+        return self.game.get_game_state()
+
+    def _on_difficulty_selected(self, label: str):
+        """GUI callback when a difficulty is chosen from the dropdown.
+
+        Maps the displayed label to the difficulty string and enqueues a Playwright task
+        that starts a new game and returns the state; when complete the grid is rebuilt.
+        """
+        diff_value = self._diff_map.get(label, "beginner")
+        if not hasattr(self, 'game') or self.game is None:
+            return
+
+        def _done(result):
+            if isinstance(result, Exception):
+                self.update_status("Status: Failed to change difficulty")
+                return
+            try:
+                if result is not None:
+                    # debug print of the returned game_status for troubleshooting
+                    try:
+                        rows = len(result)
+                        cols = len(result[0]) if rows > 0 else 0
+                    except Exception:
+                        rows = cols = 0
+                    print(f"DEBUG: game_status ({rows}x{cols}): ")
+                    print(result)
+                    self.build_grid(self.grid_container, game_status=result)
+                    self.update_status(f"Status: Difficulty set to {label}")
+            except Exception:
+                pass
+
+        task = {'func': self._do_new_game, 'args': (diff_value,), 'done': _done}
+        self._playwright_tasks.put(task)
+
     def initialize_interface(self):
         # Left column: contains grid on top and status label below
         self.left_column = tk.Frame(self.root)
@@ -306,6 +346,17 @@ class App:
         # Right: vertical buttons
         self.sidebar = tk.Frame(self.root)
         self.sidebar.pack(side="right", fill="y", padx=8, pady=8)
+
+        # Difficulty selector
+        diff_frame = tk.Frame(self.sidebar)
+        diff_frame.pack(fill="x", pady=(0,6))
+        tk.Label(diff_frame, text="Difficulty:").pack(side="left")
+        # display labels mapped to values passed to Game.new_game
+        self._diff_map = {"Beginner": "beginner", "Intermediate": "intermediate", "Expert": "expert"}
+        self._diff_var = tk.StringVar(value="Beginner")
+        options = list(self._diff_map.keys())
+        diff_menu = tk.OptionMenu(diff_frame, self._diff_var, *options, command=self._on_difficulty_selected)
+        diff_menu.pack(side="right")
 
         tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
