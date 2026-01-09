@@ -1,96 +1,115 @@
+from typing import List, Optional
+
 import numpy as np
 
-# Bind with the minesweeperonline.com website, need to have 
-# a playwright page object to work with
 
 class Game:
-    
-    w = -1
-    h = -1
-    
-    # take a playwright page object as input
-    def __init__(self, page):
+    """Wrapper around a Playwright page that exposes Minesweeper actions
+
+    Coordinates used by this class are 1-based to match the site's element ids.
+    """
+
+    def __init__(self, page) -> None:
         self.page = page
-        
-    # difficulty: "beginner": 9x9, "intermediate": 16x16, "" for expert: 16x30    
-    def new_game(self, difficulty):
+        self.w: int = -1
+        self.h: int = -1
+
+    def new_game(self, difficulty: str) -> None:
+        """Start a new game on the website and set board dimensions."""
         if difficulty == "beginner":
             self.w, self.h = 9, 9
         elif difficulty == "intermediate":
             self.w, self.h = 16, 16
         else:  # expert
             self.w, self.h = 30, 16
-        self.page.goto("https://minesweeperonline.com/#" + difficulty)
-        
-        
-    def handle_click(self, x, y):
-        
-        if (x < 0 or x > self.w or y < 0 or y > self.h):
+
+        self.page.goto(f"https://minesweeperonline.com/#{difficulty}")
+
+    def _check_bounds(self, x: int, y: int) -> None:
+        if x < 1 or x > self.w or y < 1 or y > self.h:
             raise ValueError("Coordinates out of bounds")
-        
-        # click on the square by their id
+
+    def handle_click(self, x: int, y: int) -> List[List[int]]:
+        """Left-click the square at 1-based coordinates (x,y) and return the updated game state."""
+        self._check_bounds(x, y)
         square_id = f"{y}_{x}"
         print(f"Clicking on square {square_id}")
         self.page.locator("#game").locator(f'[id="{square_id}"]').click()
         return self.get_game_state()
-        
-    # convert the game to 2d array representation 
-       
-    def get_game_state(self):
-        
+
+    def handle_right_click(self, x: int, y: int) -> None:
+        """Right-click (flag/unflag) the square at 1-based coordinates (x,y)."""
+        self._check_bounds(x, y)
+        square_id = f"{y}_{x}"
+        print(f"Right clicking on square {square_id}")
+        self.page.locator("#game").locator(f'[id="{square_id}"]').click(button="right")
+
+    def get_game_state(self) -> List[List[int]]:
+        """Read the current board from the page and return a 2D integer list.
+
+        Encoding:
+        -1: unrevealed (blank)
+        -2: flagged
+         0-8: revealed numbers
+        -9: bomb revealed
+       -10: bomb death
+       -11: bomb flagged
+        """
         if self.w == -1 or self.h == -1:
             raise ValueError("Game not initialized. Please start a new game first.")
-        
-        # initialize empty board
+
         board = np.zeros((self.h, self.w), dtype=int)
-        
-        # locate the div with id "game"
         game_container = self.page.locator("#game")
-        
-        # only look at the squares and ignore the rest
+
         elements = game_container.evaluate("""
             (root) => {
                 return [...root.querySelectorAll("*")]
-                    .filter(el =>
-                        [...el.classList].some(cls => cls.startsWith("square"))
-                    )
-                    .map(el => ({
-                        id: el.id || null,
-                        classes: [...el.classList]
-                    }));
+                    .filter(el => [...el.classList].some(cls => cls.startsWith("square")))
+                    .map(el => ({ id: el.id || null, classes: [...el.classList] }));
             }
             """)
 
         for el in elements:
-            row, col = map(int, el['id'].split('_'))
-            print(row, col)
-            row -= 1  # adjust for 0-based indexing
-            col -= 1  # adjust for 0-based indexing
-            # if out of bound: continue
+            try:
+                row, col = map(int, el["id"].split("_"))
+            except Exception:
+                continue
+            # convert to 0-based
+            row -= 1
+            col -= 1
             if row < 0 or row >= self.h or col < 0 or col >= self.w:
                 continue
-            board[row, col] = self.square_encode(el['classes'][1])
-        return board.tolist()
-    
-    # -1 for blank(unrevealed), -2 for flagged, 0-8 for revealed squares
-    # -9 for bombrevealed, -10 for bombdeath, -11 for bombflagged
-    def square_encode(self, string:str) -> int:
-        if 'blank' == string:
-            return -1
-        elif 'bombflagged' == string:
-            return -11
-        elif 'bombdeath' == string:
-            return -10
-        elif 'bombrevealed' == string:
-            return -9
-        elif 'flagged' == string:
-            return -2
-        else:
-            if string.startswith('open'):
-                num = int(string.replace('open', ''))
-                return num
+
+            # Find a meaningful class for the square
+            classes: List[str] = el.get("classes", [])
+            cls = next((c for c in classes if c != "square" and not c.startswith("square")), None)
+            if cls is None:
+                board[row, col] = -1
             else:
+                board[row, col] = self.square_encode(cls)
+
+        return board.tolist()
+
+    def square_encode(self, cls: str) -> int:
+        cls = cls or ""
+        if cls == "blank":
+            return -1
+        if cls == "bombflagged":
+            return -11
+        if cls == "bombdeath":
+            return -10
+        if cls == "bombrevealed":
+            return -9
+        # flagged or miss-flagged
+        if cls in ("flagged", "missflagged", "bombmisflagged"):
+            return -2
+        if cls.startswith("open"):
+            try:
+                num = int(cls.replace("open", ""))
+                return num
+            except Exception:
                 return -1
+        return -1
 
         
         

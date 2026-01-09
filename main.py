@@ -3,10 +3,7 @@ import queue
 import tkinter as tk
 from playwright.sync_api import sync_playwright
 from Game import Game
-
-ROWS = 16
-COLUMNS = 30
-CELL_SIZE = 35
+from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, CHECK_CHAR, NUMBER_COLOR_MAP
 
 class App:
     def __init__(self):
@@ -34,7 +31,6 @@ class App:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(headless=True)
             self.page = self.browser.new_page()
-            self.page.goto("https://minesweeperonline.com")
             # create Game context using the Playwright page
             try:
                 self.game = Game(self.page)
@@ -96,6 +92,21 @@ class App:
         """Update the status label in a thread-safe manner."""
         self.root.after(0, lambda: self.status_label.config(text=message))
 
+    def _place_label(self, cell, text, fg=None, bold=False, bind_right_click=False, coord=None):
+        """Create and place a centered Label inside `cell` with font sized to CELL_SIZE.
+
+        If `bind_right_click` is True the label will forward right-clicks to `on_right_click` using `coord`.
+        Returns the created Label.
+        """
+        font_size = max(8, int(CELL_SIZE * 0.6))
+        font_spec = (None, font_size, "bold") if bold else (None, font_size)
+        lbl = tk.Label(cell, text=text, bg=cell.cget('bg'), fg=fg, font=font_spec)
+        lbl.place(relx=0.5, rely=0.5, anchor="center")
+        if bind_right_click and coord is not None:
+            rr, cc = coord
+            lbl.bind("<Button-3>", lambda _e, r=rr, c=cc: self.on_right_click(r, c))
+        return lbl
+
     def on_click(self):
         self.page.locator("text=More information").click()
 
@@ -152,7 +163,7 @@ class App:
                 # background rules
                 if val is None:
                     bg = "white"
-                elif val == -1:
+                elif val == -1 or val == -11:
                     bg = "#D3D3D3"
                 elif val == -10:
                     bg = "red"
@@ -170,6 +181,8 @@ class App:
                 cell.grid(row=r, column=c)
                 cell.grid_propagate(False)  # keep the fixed pixel size
                 cell.bind("<Button-1>", lambda _e, rr=r, cc=c: self.on_cell_click(rr, cc))
+                # right click to place/remove flag
+                cell.bind("<Button-3>", lambda _e, rr=r, cc=c: self.on_right_click(rr, cc))
 
                 # compute a font size proportional to the cell size
                 font_size = max(8, int(CELL_SIZE * 0.6))
@@ -178,32 +191,17 @@ class App:
                 if val is not None:
                     # show numbers 1-8 (0 usually shown as blank)
                     if isinstance(val, int) and val >= 1:
-                        # Minesweeper color mapping for numbers
-                        color_map = {
-                            1: "#0000FF",  # blue
-                            2: "#008000",  # green
-                            3: "#FF0000",  # red
-                            4: "#00008B",  # dark blue
-                            5: "#840000",  # maroon
-                            6: "#00FFFF",  # cyan/teal
-                            7: "#000000",  # black
-                            8: "#808080",  # gray
-                        }
-                        fg = color_map.get(val, "black")
-                        lbl = tk.Label(cell, text=str(val), bg=bg, fg=fg, font=(None, font_size, "bold"))
-                        lbl.place(relx=0.5, rely=0.5, anchor="center")
-                    elif val == -2:
-                        # triangular flag emoji U+1F6A9
-                        lbl = tk.Label(cell, text="\U0001F6A9", bg=bg, font=(None, font_size))
-                        lbl.place(relx=0.5, rely=0.5, anchor="center")
-                    elif val in (-9, -10):
-                        # bomb emoji
-                        lbl = tk.Label(cell, text="💣", bg=bg, font=(None, font_size))
-                        lbl.place(relx=0.5, rely=0.5, anchor="center")
+                        fg = NUMBER_COLOR_MAP.get(val, "black")
+                        self._place_label(cell, str(val), fg=fg, bold=True)
                     elif val == -11:
-                        # checkmark U+2714 (green)
-                        lbl = tk.Label(cell, text="\u2714", bg=bg, fg="#008200", font=(None, font_size, "bold"))
-                        lbl.place(relx=0.5, rely=0.5, anchor="center")
+                        # flag
+                        self._place_label(cell, FLAG_CHAR, bind_right_click=True, coord=(r, c))
+                    elif val in (-9, -10):
+                        # bomb
+                        self._place_label(cell, BOMB_CHAR)
+                    elif val == -2:
+                        # cross emoji ❌ U+274C
+                        self._place_label(cell, "\u274C", fg="#FF0000", bold=True)
 
                 row_cells.append(cell)
             self.cells.append(row_cells)
@@ -238,6 +236,58 @@ class App:
         except Exception:
             return
 
+    def on_right_click(self, row, col):
+        """Toggle a flag on the clicked cell and notify the Game via handle_right_click.
+
+        The flag is shown/removed immediately in the UI. The Game.handle_right_click
+        call is enqueued to the Playwright thread but the grid is not rebuilt.
+        """
+        if not (0 <= row < ROWS and 0 <= col < COLUMNS):
+            return
+
+        # Do nothing if game isn't ready
+        if not hasattr(self, 'game') or self.game is None:
+            return
+
+        cell = self.cells[row][col]
+
+        # detect existing flag label (exact emoji)
+        FLAG = "\U0001F6A9"
+        existing_flag = None
+        for child in cell.winfo_children():
+            try:
+                if isinstance(child, tk.Label) and child.cget("text") == FLAG:
+                    existing_flag = child
+                    break
+            except Exception:
+                continue
+
+        if existing_flag is not None:
+            # remove flag immediately
+            try:
+                existing_flag.destroy()
+            except Exception:
+                pass
+        else:
+            # add a flag label sized to the cell
+            font_size = max(8, int(CELL_SIZE * 0.6))
+            try:
+                lbl = tk.Label(cell, text=FLAG, bg=cell.cget('bg'), font=(None, font_size))
+                lbl.place(relx=0.5, rely=0.5, anchor="center")
+                # bind right-click on the label so subsequent right-clicks reach the handler
+                lbl.bind("<Button-3>", lambda _e, rr=row, cc=col: self.on_right_click(rr, cc))
+            except Exception:
+                pass
+
+        # enqueue Playwright task to call Game.handle_right_click if available
+        try:
+            func = getattr(self.game, 'handle_right_click', None)
+            if callable(func):
+                task = {'func': func, 'args': (col + 1, row + 1), 'done': None}
+                self._playwright_tasks.put(task)
+        except Exception:
+            return
+
     def initialize_interface(self):
         # Left column: contains grid on top and status label below
         self.left_column = tk.Frame(self.root)
@@ -259,7 +309,7 @@ class App:
 
         tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Quit", command=self.root.destroy).pack(fill="x", pady=2)
+        tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
         
         # Label indicating the progress, placed below the grid in the left column
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
