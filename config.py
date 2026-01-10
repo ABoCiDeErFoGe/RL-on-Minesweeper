@@ -19,3 +19,8 @@ NUMBER_COLOR_MAP = {
     7: "#000000",
     8: "#808080",
 }
+
+# Rewards for RL environment (tweakable)
+REWARD_BOMB_DEATH = -1
+REWARD_STEP = 0.01
+REWARD_WIN = 5

@@ -98,7 +98,7 @@ class App:
         If `bind_right_click` is True the label will forward right-clicks to `on_right_click` using `coord`.
         Returns the created Label.
         """
-        font_size = max(8, int(CELL_SIZE * 0.6))
+        font_size = max(8, int(CELL_SIZE * 0.55))
         font_spec = (None, font_size, "bold") if bold else (None, font_size)
         lbl = tk.Label(cell, text=text, bg=cell.cget('bg'), fg=fg, font=font_spec)
         lbl.place(relx=0.5, rely=0.5, anchor="center")
@@ -133,7 +133,7 @@ class App:
     def run(self):
         self.root.mainloop()
         
-    def build_grid(self, container, game_status=None):
+    def build_grid(self, container, game_status=None, click_history=None):
         """Creates a ROWS x COLUMNS grid using Frame widgets and renders `game_status`.
 
         `game_status` is an optional 2D list of integers. If provided, cells will be
@@ -205,6 +205,21 @@ class App:
 
                 row_cells.append(cell)
             self.cells.append(row_cells)
+
+        # add click-order footers if provided: click_history is a dict {(row,col): order}
+        try:
+            if click_history:
+                footer_font_size = max(6, int(CELL_SIZE * 0.3))
+                for (rr, cc), order in click_history.items():
+                    if 0 <= rr < len(self.cells) and 0 <= cc < len(self.cells[rr]):
+                        cell = self.cells[rr][cc]
+                        try:
+                            lbl = tk.Label(cell, text=str(order), bg="white", fg='black', font=(None, footer_font_size))
+                            lbl.place(relx=0.5, rely=0.8, anchor='center')
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
 
     def on_cell_click(self, row, col):
@@ -296,6 +311,106 @@ class App:
         self.game.new_game(difficulty)
         return self.game.get_game_state()
 
+    def _run_random_agent(self, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
+        """Run the RandomAgent inside the Playwright worker thread and return its result dict."""
+        if not hasattr(self, 'game') or self.game is None:
+            raise RuntimeError("Game not initialized")
+        # Import inside worker thread to keep imports local to the thread
+        from random_agent import RandomAgent
+        from Game import MSEnv
+
+        env = MSEnv(self.game)
+        agent = RandomAgent(env, right_click_prob=right_click_prob)
+        # run to completion; RandomAgent returns the final board state
+        return agent.run_episode(difficulty=None, max_steps=max_steps, delay=delay)
+
+    def _run_baseline_agent(self, max_steps: int = 1000, delay: float = 0.0):
+        """Run the BaselineAgent inside the Playwright worker thread and return its result dict."""
+        if not hasattr(self, 'game') or self.game is None:
+            raise RuntimeError("Game not initialized")
+        # Import inside worker thread to keep imports local to the thread
+        from baseline_agent import BaselineAgent
+        from Game import MSEnv
+
+        env = MSEnv(self.game)
+        agent = BaselineAgent(env)
+        return agent.run_episode(difficulty=None, max_steps=max_steps, delay=delay)
+
+    def _click_map_from_history(self, history):
+        """Convert agent `history` into a mapping {(r,c): order} for footers.
+
+        `history` is a list of ((x,y,mode), reward, done) tuples where x,y are
+        1-based coordinates. Returns dict keyed by 0-based (row,col).
+        """
+        click_map = {}
+        for idx, entry in enumerate(history, start=1):
+            try:
+                action = entry[0]
+                x, y = action[0], action[1]
+                rr = y - 1
+                cc = x - 1
+                # only keep first occurrence (order)
+                if (rr, cc) not in click_map:
+                    click_map[(rr, cc)] = idx
+            except Exception:
+                continue
+        return click_map
+
+    def _handle_agent_result(self, agent_name: str, result):
+        """Common done-callback for agents: render final state and update status."""
+        if isinstance(result, Exception):
+            self.update_status(f"Status: {agent_name} failed")
+            print(f"{agent_name} error:", result)
+            return
+        try:
+            steps = result.get('steps', 0)
+            reward = result.get('reward', 0)
+            done = result.get('done', False)
+            hist = result.get('history', [])
+            click_map = self._click_map_from_history(hist)
+
+            final_state = result.get('final_state')
+            if final_state is not None:
+                self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
+            self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
+        except Exception:
+            pass
+
+    def _enqueue_agent(self, worker_func, kwargs: dict, agent_name: str):
+        """Put an agent-running task on the Playwright worker and attach common done handler."""
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+
+        task = {
+            'func': worker_func,
+            'kwargs': kwargs,
+            'done': (lambda res, name=agent_name: self._handle_agent_result(name, res)),
+        }
+        try:
+            self._playwright_tasks.put(task)
+            self.update_status(f"Status: {agent_name} started...")
+        except Exception:
+            self.update_status(f"Status: Failed to start {agent_name}")
+
+    def start_random_agent(self, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
+        """Enqueue a task to start the random agent on the Playwright thread and display result in the GUI."""
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+
+        # Use the common enqueuer to run the random agent and handle results
+        self._enqueue_agent(self._run_random_agent, {'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob}, 'Random agent')
+
+    def start_baseline_agent(self, max_steps: int = 1000, delay: float = 0.0):
+        """Enqueue a task to start the BaselineAgent on the Playwright thread and display result in the GUI."""
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+
+        # Use the common enqueuer to run the baseline agent and handle results
+        self._enqueue_agent(self._run_baseline_agent, {'max_steps': max_steps, 'delay': delay}, 'Baseline agent')
+
     def _on_difficulty_selected(self, label: str):
         """GUI callback when a difficulty is chosen from the dropdown.
 
@@ -359,6 +474,8 @@ class App:
         diff_menu.pack(side="right")
 
         tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
+        tk.Button(self.sidebar, text="Random Agent", command=lambda: self.start_random_agent()).pack(fill="x", pady=2)
+        tk.Button(self.sidebar, text="Baseline Agent", command=lambda: self.start_baseline_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
         

@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 import numpy as np
+from config import REWARD_BOMB_DEATH, REWARD_STEP, REWARD_WIN
 
 
 class Game:
@@ -136,6 +137,89 @@ class Game:
             except Exception:
                 return -1
         return -1
+
+    def get_result(self) -> int:
+        """Return game result based on the face element's class:
+
+        - 1: win (face has class 'facewin')
+        - 0: still playing (face has class 'facesmile' or unknown)
+        - -1: lost (face has class 'facedead')
+        """
+        try:
+            face_cls = self.page.locator("#face").get_attribute("class")
+        except Exception:
+            return 0
+
+        if not face_cls:
+            return 0
+        face_cls = face_cls.lower()
+        if "facewin" in face_cls:
+            return 1
+        if "facedead" in face_cls:
+            return -1
+        # treat smile/other as ongoing
+        return 0
+
+
+class MSEnv:
+    """A lightweight RL-style environment wrapper around `Game`.
+
+    Action format: a tuple (x, y, mode) where x and y are 1-based coordinates
+    and mode is either 'left' or 'right'. Example: (3, 5, 'left')
+
+    The environment provides:
+    - reset(difficulty=None) -> state
+    - step(action) -> (state, reward, done, info)
+    """
+
+    def __init__(self, game: Game, difficulty: str = "beginner") -> None:
+        self.game = game
+        self.default_difficulty = difficulty
+
+    def reset(self, difficulty: Optional[str] = None) -> List[List[int]]:
+        """Start a new game and return the initial state."""
+        diff = difficulty if difficulty is not None else self.default_difficulty
+        self.game.new_game(diff)
+        state = self.game.get_game_state()
+        return state
+
+    def step(self, action) -> (List[List[int]], int, bool, dict):
+        """Apply an action and return (state, reward, done, info).
+
+        Reward/done policy (simple):
+        - If a left click results in a bomb death (-10) anywhere: done=True, reward=-1
+        - Otherwise reward=0 and done=False
+        - Right-clicks (flags) return reward 0 and do not mark done here
+        """
+        # validate action
+        try:
+            x, y, mode = action
+        except Exception:
+            raise ValueError("Action must be a tuple (x, y, mode)")
+
+        if mode == "left":
+            state = self.game.handle_click(x, y)
+        elif mode == "right":
+            # perform right click (flag/unflag)
+            self.game.handle_right_click(x, y)
+            state = self.game.get_game_state()
+        else:
+            raise ValueError("mode must be 'left' or 'right'")
+
+        # prefer checking the page face for definitive result (win/loss)
+        result = self.game.get_result()
+        if result == 1:
+            done = True
+            reward = REWARD_WIN
+        elif result == -1:
+            done = True
+            reward = REWARD_BOMB_DEATH
+        else:
+            # fallback: inspect state for bomb death squares
+            done = any(-10 in row for row in state)
+            reward = REWARD_BOMB_DEATH if done else REWARD_STEP
+        info = {}
+        return state, reward, done, info
 
         
         
