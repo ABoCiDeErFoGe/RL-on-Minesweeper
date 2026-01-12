@@ -340,25 +340,31 @@ class App:
         self.game.new_game(difficulty)
         return self.game.get_game_state()
 
-    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05, episodes: int = 1):
+    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05, episodes: int = 1, agent_name: str = None):
         """Wrapper that delegates to the generic `_run_agent` adaptor for RandomAgent.
 
         Kept as a thin shim so existing enqueue code remains unchanged.
         """
+        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
+        if agent_name:
+            rw['agent_name'] = agent_name
         return self._run_agent(
             module_name="random_agent",
             class_name="RandomAgent",
             agent_init_kwargs={"right_click_prob": right_click_prob},
-            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes},
+            run_kwargs=rw,
         )
 
-    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0, episodes: int = 1):
+    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0, episodes: int = 1, agent_name: str = None):
         """Wrapper that delegates to the generic `_run_agent` adaptor for BaselineAgent."""
+        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
+        if agent_name:
+            rw['agent_name'] = agent_name
         return self._run_agent(
             module_name="baseline_agent",
             class_name="BaselineAgent",
             agent_init_kwargs={},
-            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes},
+            run_kwargs=rw,
         )
 
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
@@ -389,6 +395,9 @@ class App:
 
         # support running multiple episodes by passing 'episodes' in run_kwargs
         episodes = int(run_kwargs.pop('episodes', 1)) if 'episodes' in run_kwargs else 1
+        # optional agent name for per-episode display (may be provided by caller)
+        agent_name = run_kwargs.pop('agent_name', class_name)
+
         if episodes <= 1:
             return agent.run_episode(**run_kwargs)
 
@@ -400,6 +409,24 @@ class App:
             results.append(res)
             # track final_state from last episode if present
             final_state = res.get('final_state') if isinstance(res, dict) else None
+
+            # Notify GUI about this episode via a short-lived thread which schedules
+            # a GUI-thread callback. This keeps worker-side timing predictable
+            # while allowing the GUI to update responsively per-episode.
+            try:
+                idx = i + 1
+                def _notify_thread(index, result_obj, total, name=agent_name):
+                    import threading
+                    def _do_notify():
+                        try:
+                            self.root.after(0, lambda: self._handle_episode_progress(name, index, result_obj, total))
+                        except Exception:
+                            pass
+                    t = threading.Thread(target=_do_notify, daemon=True)
+                    t.start()
+                _notify_thread(idx, res, episodes)
+            except Exception:
+                pass
 
         return {'episodes': episodes, 'results': results, 'final_state': final_state}
 
@@ -423,6 +450,86 @@ class App:
                 continue
         return click_map
 
+    def _handle_episode_progress(self, agent_name: str, episode_index: int, result, total_episodes: int):
+        """Update the episode info frame for a single finished episode.
+
+        This runs on the GUI thread (it's scheduled via `root.after`). It records
+        per-episode summary into `self._current_agent_run['results']` so the
+        final aggregated summary can be computed when all episodes finish.
+        """
+        try:
+            # record result in current run state if present
+            if hasattr(self, '_current_agent_run') and self._current_agent_run is not None:
+                try:
+                    rec = {}
+                    if isinstance(result, dict):
+                        rec['steps'] = int(result.get('steps', 0))
+                        rec['reward'] = float(result.get('reward', 0))
+                        rec['done'] = bool(result.get('done', False))
+                        rec['random_clicks'] = int(result.get('random_clicks', 0)) if 'random_clicks' in result else 0
+                    else:
+                        rec['steps'] = 0
+                        rec['reward'] = 0.0
+                        rec['done'] = False
+                        rec['random_clicks'] = 0
+                    self._current_agent_run['results'].append(rec)
+                except Exception:
+                    pass
+
+            # build a concise per-episode display string
+            try:
+                if isinstance(result, dict):
+                    steps = result.get('steps', 0)
+                    done = result.get('done', False)
+                    rc = result.get('random_clicks', result.get('random_click', 0)) if isinstance(result.get('random_clicks', None), int) or result.get('random_clicks', None) is not None else 0
+                    outcome = 'Win' if done and result.get('reward', 0) > 0 else ('Lose' if done else 'Incomplete')
+                    text = f"Episode {episode_index}/{total_episodes}: {outcome}, steps={steps}, random_clicks={rc}"
+                else:
+                    text = f"Episode {episode_index}/{total_episodes}: completed"
+            except Exception:
+                text = f"Episode {episode_index}/{total_episodes}: result"
+
+            try:
+                self._episode_fields['last'].config(text=text)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _update_episode_summary_from_results(self, results_list):
+        """Compute aggregate metrics from a list of per-episode result dicts and update the summary label.
+
+        Designed to be easily extended with new metrics in the future.
+        """
+        try:
+            if not isinstance(results_list, list):
+                return
+            n = len(results_list)
+            if n == 0:
+                return
+            wins = 0
+            total_steps = 0
+            total_random = 0
+            for r in results_list:
+                if not isinstance(r, dict):
+                    continue
+                if r.get('done', False) and r.get('reward', 0) > 0:
+                    wins += 1
+                total_steps += int(r.get('steps', 0))
+                total_random += int(r.get('random_clicks', r.get('random_click', 0))) if ('random_clicks' in r or 'random_click' in r) else 0
+
+            win_rate = wins / n * 100.0
+            avg_steps = total_steps / n if n else 0
+            avg_random = total_random / n if n else 0
+
+            summary_text = f"Win rate: {win_rate:.1f}%  |  Avg steps: {avg_steps:.1f}  |  Avg random clicks: {avg_random:.1f}"
+            try:
+                self._episode_fields['summary'].config(text=summary_text)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _handle_agent_result(self, agent_name: str, result):
         """Common done-callback for agents: render final state and update status."""
         if isinstance(result, Exception):
@@ -444,6 +551,8 @@ class App:
                 final_state = result.get('final_state')
                 if final_state is not None:
                     self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
+                # update aggregated summary frame
+                self._update_episode_summary_from_results(results)
                 self.update_status(f"{agent_name} finished ({result.get('episodes',len(results))}): steps={total_steps}, reward={total_reward}, done={any_done}")
             else:
                 steps = result.get('steps', 0)
@@ -454,6 +563,8 @@ class App:
                 final_state = result.get('final_state')
                 if final_state is not None:
                     self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
+                # single episode: update summary/frame as well
+                self._update_episode_summary_from_results([result])
                 self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
         except Exception:
             pass
@@ -463,6 +574,18 @@ class App:
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
+        # initialize run-tracking state for per-episode UI updates
+        total_eps = int(kwargs.get('episodes', 1)) if isinstance(kwargs, dict) else 1
+        try:
+            self._current_agent_run = {'agent_name': agent_name, 'total_episodes': total_eps, 'results': []}
+            # clear episode info fields
+            try:
+                self._episode_fields['last'].config(text="")
+                self._episode_fields['summary'].config(text="")
+            except Exception:
+                pass
+        except Exception:
+            self._current_agent_run = None
 
         task = {
             'func': worker_func,
@@ -505,7 +628,7 @@ class App:
 
         self._enqueue_agent(
             self._run_random_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob, 'episodes': episodes},
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob, 'episodes': episodes, 'agent_name': 'Random agent'},
             'Random agent',
         )
 
@@ -538,7 +661,7 @@ class App:
 
         self._enqueue_agent(
             self._run_baseline_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes},
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'Baseline agent'},
             'Baseline agent',
         )
 
@@ -627,6 +750,16 @@ class App:
         tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
         
         # Label indicating the progress, placed below the grid in the left column
+        # Episode info frame: shows per-episode and aggregated statistics
+        self.episode_info_frame = tk.Frame(self.left_column, relief='groove', bd=1)
+        tk.Label(self.episode_info_frame, text="Episode Info:").pack(anchor='w', padx=4)
+        self._episode_fields = {}
+        self._episode_fields['last'] = tk.Label(self.episode_info_frame, text="", anchor='w')
+        self._episode_fields['last'].pack(fill='x', padx=6)
+        self._episode_fields['summary'] = tk.Label(self.episode_info_frame, text="", anchor='w')
+        self._episode_fields['summary'].pack(fill='x', padx=6, pady=(0,4))
+        self.episode_info_frame.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
         self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
         
