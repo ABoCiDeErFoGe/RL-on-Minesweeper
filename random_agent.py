@@ -72,7 +72,7 @@ class RandomAgent:
             if delay:
                 time.sleep(delay)
 
-        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state}
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": len(history)}
 
 
 if __name__ == "__main__":

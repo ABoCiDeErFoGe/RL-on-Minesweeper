@@ -61,6 +61,7 @@ class BaselineAgent:
         total_reward = 0
         history = []
         done = False
+        random_click = 0
 
         # Main loop: attempt to apply deterministic rules until the game ends
         while steps < max_steps and not done:
@@ -137,6 +138,7 @@ class BaselineAgent:
                     break
                 choice = random.choice(unrevealed)
                 dedup_actions = [(choice[0], choice[1], 'left')]
+                random_click += 1
 
             # Execute selected actions sequentially; after each action update
             # the local `state` and record the transition in `history`.
@@ -159,7 +161,7 @@ class BaselineAgent:
                     break
 
         # Return a summary including the final board state for rendering
-        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state}
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click}
 
 
 if __name__ == "__main__":
