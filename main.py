@@ -340,7 +340,7 @@ class App:
         self.game.new_game(difficulty)
         return self.game.get_game_state()
 
-    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
+    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05, episodes: int = 1):
         """Wrapper that delegates to the generic `_run_agent` adaptor for RandomAgent.
 
         Kept as a thin shim so existing enqueue code remains unchanged.
@@ -349,16 +349,16 @@ class App:
             module_name="random_agent",
             class_name="RandomAgent",
             agent_init_kwargs={"right_click_prob": right_click_prob},
-            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay},
+            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes},
         )
 
-    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0):
+    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0, episodes: int = 1):
         """Wrapper that delegates to the generic `_run_agent` adaptor for BaselineAgent."""
         return self._run_agent(
             module_name="baseline_agent",
             class_name="BaselineAgent",
             agent_init_kwargs={},
-            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay},
+            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes},
         )
 
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
@@ -386,7 +386,22 @@ class App:
         agent = AgentClass(env, **init_kwargs) if init_kwargs else AgentClass(env)
 
         run_kwargs = run_kwargs or {}
-        return agent.run_episode(**run_kwargs)
+
+        # support running multiple episodes by passing 'episodes' in run_kwargs
+        episodes = int(run_kwargs.pop('episodes', 1)) if 'episodes' in run_kwargs else 1
+        if episodes <= 1:
+            return agent.run_episode(**run_kwargs)
+
+        # run multiple episodes sequentially and collect results
+        results = []
+        final_state = None
+        for i in range(episodes):
+            res = agent.run_episode(**run_kwargs)
+            results.append(res)
+            # track final_state from last episode if present
+            final_state = res.get('final_state') if isinstance(res, dict) else None
+
+        return {'episodes': episodes, 'results': results, 'final_state': final_state}
 
     def _click_map_from_history(self, history):
         """Convert agent `history` into a mapping {(r,c): order} for footers.
@@ -415,16 +430,31 @@ class App:
             print(f"{agent_name} error:", result)
             return
         try:
-            steps = result.get('steps', 0)
-            reward = result.get('reward', 0)
-            done = result.get('done', False)
-            hist = result.get('history', [])
-            click_map = self._click_map_from_history(hist)
-
-            final_state = result.get('final_state')
-            if final_state is not None:
-                self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
-            self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
+            # Support both single-run result dicts and multi-episode aggregates
+            if isinstance(result, dict) and 'results' in result:
+                # aggregate across episodes
+                results = result.get('results', [])
+                total_steps = sum(r.get('steps', 0) for r in results if isinstance(r, dict))
+                total_reward = sum(r.get('reward', 0) for r in results if isinstance(r, dict))
+                any_done = any(r.get('done', False) for r in results if isinstance(r, dict))
+                # use last episode's history/state for display
+                last = results[-1] if results else {}
+                hist = last.get('history', []) if isinstance(last, dict) else []
+                click_map = self._click_map_from_history(hist)
+                final_state = result.get('final_state')
+                if final_state is not None:
+                    self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
+                self.update_status(f"{agent_name} finished ({result.get('episodes',len(results))}): steps={total_steps}, reward={total_reward}, done={any_done}")
+            else:
+                steps = result.get('steps', 0)
+                reward = result.get('reward', 0)
+                done = result.get('done', False)
+                hist = result.get('history', [])
+                click_map = self._click_map_from_history(hist)
+                final_state = result.get('final_state')
+                if final_state is not None:
+                    self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
+                self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
         except Exception:
             pass
 
@@ -453,9 +483,29 @@ class App:
 
         # determine difficulty from UI selection and enqueue agent
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        # determine episodes: custom entry takes precedence
+        episodes = None
+        try:
+            custom = self._episodes_entry.get().strip()
+            if custom:
+                episodes = int(custom)
+        except Exception:
+            episodes = None
+
+        if episodes is None:
+            try:
+                episodes = int(self._episodes_var.get())
+            except Exception:
+                episodes = 1
+
+        # validate
+        if episodes <= 0:
+            self.update_status("Status: Invalid episodes number")
+            return
+
         self._enqueue_agent(
             self._run_random_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob},
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob, 'episodes': episodes},
             'Random agent',
         )
 
@@ -467,9 +517,28 @@ class App:
 
         # determine difficulty from UI selection and enqueue agent
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        # determine episodes
+        episodes = None
+        try:
+            custom = self._episodes_entry.get().strip()
+            if custom:
+                episodes = int(custom)
+        except Exception:
+            episodes = None
+
+        if episodes is None:
+            try:
+                episodes = int(self._episodes_var.get())
+            except Exception:
+                episodes = 1
+
+        if episodes <= 0:
+            self.update_status("Status: Invalid episodes number")
+            return
+
         self._enqueue_agent(
             self._run_baseline_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay},
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes},
             'Baseline agent',
         )
 
@@ -535,6 +604,22 @@ class App:
         diff_menu = tk.OptionMenu(diff_frame, self._diff_var, *options, command=self._on_difficulty_selected)
         diff_menu.pack(side="right")
 
+        # Episodes selector (predefined + custom entry)
+        episodes_frame = tk.Frame(self.sidebar)
+        episodes_frame.pack(fill="x", pady=(6,6))
+        tk.Label(episodes_frame, text="Episodes:").pack(side="left")
+        # predefined options
+        self._episodes_var = tk.StringVar(value="1")
+        episode_options = ["1", "5", "10", "50"]
+        episodes_menu = tk.OptionMenu(episodes_frame, self._episodes_var, *episode_options)
+        episodes_menu.pack(side="right")
+        # custom entry below
+        custom_frame = tk.Frame(self.sidebar)
+        custom_frame.pack(fill="x")
+        tk.Label(custom_frame, text="Custom:").pack(side="left")
+        self._episodes_entry = tk.Entry(custom_frame, width=6)
+        self._episodes_entry.pack(side="right")
+
         tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Random Agent", command=lambda: self.start_random_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Baseline Agent", command=lambda: self.start_baseline_agent()).pack(fill="x", pady=2)
@@ -545,5 +630,4 @@ class App:
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
         self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
         
-
 App().run()
