@@ -311,30 +311,53 @@ class App:
         self.game.new_game(difficulty)
         return self.game.get_game_state()
 
-    def _run_random_agent(self, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
-        """Run the RandomAgent inside the Playwright worker thread and return its result dict."""
+    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
+        """Wrapper that delegates to the generic `_run_agent` adaptor for RandomAgent.
+
+        Kept as a thin shim so existing enqueue code remains unchanged.
+        """
+        return self._run_agent(
+            module_name="random_agent",
+            class_name="RandomAgent",
+            agent_init_kwargs={"right_click_prob": right_click_prob},
+            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay},
+        )
+
+    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0):
+        """Wrapper that delegates to the generic `_run_agent` adaptor for BaselineAgent."""
+        return self._run_agent(
+            module_name="baseline_agent",
+            class_name="BaselineAgent",
+            agent_init_kwargs={},
+            run_kwargs={"difficulty": difficulty, "max_steps": max_steps, "delay": delay},
+        )
+
+    def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
+        """Generic worker-side adaptor to run any agent class.
+
+        - Dynamically imports `module_name` and looks up `class_name`.
+        - Instantiates the agent with the environment `MSEnv(self.game)` plus
+          any `agent_init_kwargs`.
+        - Calls `agent.run_episode(**run_kwargs)` and returns its result.
+
+        This keeps worker logic for different agents centralized and avoids
+        duplicating import/instantiation/run code.
+        """
         if not hasattr(self, 'game') or self.game is None:
             raise RuntimeError("Game not initialized")
-        # Import inside worker thread to keep imports local to the thread
-        from random_agent import RandomAgent
+
+        import importlib
         from Game import MSEnv
 
-        env = MSEnv(self.game)
-        agent = RandomAgent(env, right_click_prob=right_click_prob)
-        # run to completion; RandomAgent returns the final board state
-        return agent.run_episode(difficulty=None, max_steps=max_steps, delay=delay)
-
-    def _run_baseline_agent(self, max_steps: int = 1000, delay: float = 0.0):
-        """Run the BaselineAgent inside the Playwright worker thread and return its result dict."""
-        if not hasattr(self, 'game') or self.game is None:
-            raise RuntimeError("Game not initialized")
-        # Import inside worker thread to keep imports local to the thread
-        from baseline_agent import BaselineAgent
-        from Game import MSEnv
+        mod = importlib.import_module(module_name)
+        AgentClass = getattr(mod, class_name)
 
         env = MSEnv(self.game)
-        agent = BaselineAgent(env)
-        return agent.run_episode(difficulty=None, max_steps=max_steps, delay=delay)
+        init_kwargs = agent_init_kwargs or {}
+        agent = AgentClass(env, **init_kwargs) if init_kwargs else AgentClass(env)
+
+        run_kwargs = run_kwargs or {}
+        return agent.run_episode(**run_kwargs)
 
     def _click_map_from_history(self, history):
         """Convert agent `history` into a mapping {(r,c): order} for footers.
@@ -399,8 +422,13 @@ class App:
             self.update_status("Status: Game not ready")
             return
 
-        # Use the common enqueuer to run the random agent and handle results
-        self._enqueue_agent(self._run_random_agent, {'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob}, 'Random agent')
+        # determine difficulty from UI selection and enqueue agent
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        self._enqueue_agent(
+            self._run_random_agent,
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob},
+            'Random agent',
+        )
 
     def start_baseline_agent(self, max_steps: int = 1000, delay: float = 0.0):
         """Enqueue a task to start the BaselineAgent on the Playwright thread and display result in the GUI."""
@@ -408,8 +436,13 @@ class App:
             self.update_status("Status: Game not ready")
             return
 
-        # Use the common enqueuer to run the baseline agent and handle results
-        self._enqueue_agent(self._run_baseline_agent, {'max_steps': max_steps, 'delay': delay}, 'Baseline agent')
+        # determine difficulty from UI selection and enqueue agent
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        self._enqueue_agent(
+            self._run_baseline_agent,
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay},
+            'Baseline agent',
+        )
 
     def _on_difficulty_selected(self, label: str):
         """GUI callback when a difficulty is chosen from the dropdown.
