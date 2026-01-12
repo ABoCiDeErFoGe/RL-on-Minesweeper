@@ -1,3 +1,16 @@
+"""Minesweeper GUI controller.
+
+This module runs a Tkinter GUI that displays a Minesweeper board and drives
+interactions on the live website via a Playwright instance. Playwright runs in
+a dedicated worker thread; tasks that need browser access are passed to the
+worker using `self._playwright_tasks` (a `queue.Queue`). The worker executes
+callables and schedules GUI updates back onto the main thread using
+`root.after(0, ...)` so all GUI ops remain thread-safe.
+
+The GUI can run small agents (random, baseline) in the Playwright worker and
+then render the final state plus a click-order footer for analysis.
+"""
+
 import threading
 import queue
 import tkinter as tk
@@ -25,7 +38,12 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def initialize_playwright(self):
-        """Initialize Playwright in a worker thread."""
+        """Initialize Playwright in a worker thread.
+
+        The worker thread owns Playwright and all browser/page interactions. We
+        instantiate Playwright here and then run a blocking loop to process
+        tasks submitted via `self._playwright_tasks`.
+        """
         try:
             self.update_status("Status: Initializing Playwright...")
             self.playwright = sync_playwright().start()
@@ -57,6 +75,9 @@ class App:
             return
 
         # Process tasks using a blocking get(); `None` is the shutdown sentinel.
+        # Each task is a dict with 'func', optional 'args'/'kwargs', and
+        # a 'done' callback that will be invoked on the GUI thread via
+        # `root.after(0, ...)` with the result of `func`.
         try:
             while True:
                 task = self._playwright_tasks.get()  # blocking
@@ -69,8 +90,10 @@ class App:
                 kwargs = task.get('kwargs', {})
                 done = task.get('done')
                 try:
+                    # All browser interactions happen here inside the worker
                     result = func(*args, **kwargs)
                 except Exception as e:
+                    # Propagate exception object to the GUI callback for reporting
                     result = e
 
                 if callable(done):
@@ -90,6 +113,7 @@ class App:
 
     def update_status(self, message):
         """Update the status label in a thread-safe manner."""
+        # Always schedule label updates on the main (GUI) thread.
         self.root.after(0, lambda: self.status_label.config(text=message))
 
     def _place_label(self, cell, text, fg=None, bold=False, bind_right_click=False, coord=None):
@@ -98,6 +122,7 @@ class App:
         If `bind_right_click` is True the label will forward right-clicks to `on_right_click` using `coord`.
         Returns the created Label.
         """
+        # compute font size proportional to cell size; guarantees minimum readability
         font_size = max(8, int(CELL_SIZE * 0.55))
         font_spec = (None, font_size, "bold") if bold else (None, font_size)
         lbl = tk.Label(cell, text=text, bg=cell.cget('bg'), fg=fg, font=font_spec)
@@ -206,7 +231,9 @@ class App:
                 row_cells.append(cell)
             self.cells.append(row_cells)
 
-        # add click-order footers if provided: click_history is a dict {(row,col): order}
+        # add click-order footers if provided: `click_history` is a mapping
+        # keyed by (row, col) in 0-based coordinates with value = click order.
+        # Footers are small labels placed near the bottom-center of each cell.
         try:
             if click_history:
                 footer_font_size = max(6, int(CELL_SIZE * 0.3))
@@ -217,8 +244,10 @@ class App:
                             lbl = tk.Label(cell, text=str(order), bg="white", fg='black', font=(None, footer_font_size))
                             lbl.place(relx=0.5, rely=0.8, anchor='center')
                         except Exception:
+                            # ignore rendering errors for individual footers
                             pass
         except Exception:
+            # ignore errors building footers
             pass
 
 
