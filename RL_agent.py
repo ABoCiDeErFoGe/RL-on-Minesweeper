@@ -71,16 +71,23 @@ class DQNAgent:
         eps_threshold = EPS_END + (EPS_START - EPS_END) * \
         math.exp(-1. * self.steps_done / EPS_DECAY)
 
+        actionmask = self.env.game.get_actionable_mask()
+        tensor_actionmask = torch.tensor(actionmask, dtype=torch.bool, device=self.device)
+
         if sample > eps_threshold:
             with torch.no_grad():
                 result = self.policy_net(state)
                 result_clone = result.clone()
                 # apply actionable mask, set non-actionable to -inf
-                actionmask = torch.tensor(self.env.game.get_actionable_mask(), dtype=torch.bool, device=self.device)
-                result_clone[~actionmask] = -float('inf')
+                result_clone[~tensor_actionmask] = -float('inf')
                 return result_clone.max(1)[1].view(1, 1)
         else:
-            return torch.tensor([[random.randrange(self.n_actions)]], dtype=torch.long)
+            # select random action from actionable actions
+            valid_indices = torch.nonzero(tensor_actionmask).squeeze().tolist()
+            if isinstance(valid_indices, int):
+                valid_indices = [valid_indices]
+            chosen_index = random.choice(valid_indices)
+            return torch.tensor([[chosen_index]], device=self.device, dtype=torch.long)
             
     def select_action_tuple(self, state, epsilon = 0.1):
         '''Select action as (x, y, mode) tuple'''
@@ -180,7 +187,7 @@ class DQNAgent:
                 next_state, reward, done, info = self.env.step((x, y, mode))
             except Exception as e:
                 # if execution failed, stop episode
-                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_clicks, "error": str(e)}
+                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": 0, "error": str(e)}
 
             # prepare tensors for replay memory
             action_tensor = torch.tensor([[action_idx]], dtype=torch.long, device=self.device)
@@ -215,3 +222,35 @@ class DQNAgent:
 
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None"}
 
+    def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
+        """Run `num_episodes` episodes sequentially and call `progress_update(info)` after each.
+
+        `progress_update` is an optional callable that receives a dict with keys:
+        - `episode`: 1-based episode index
+        - `length`: episode length (steps)
+        - `win`: boolean indicating whether episode was won
+        - `reward`: numeric reward from the episode
+
+        Returns a list of the episode result dicts.
+        """
+        results = []
+        for i in range(1, int(num_episodes) + 1):
+            res = self.run_episode(difficulty=difficulty, max_steps=max_steps, delay=delay)
+            results.append(res)
+
+            # determine win flag
+            win_flag = False
+            try:
+                if res.get('done', False) and res.get('reward', 0) > 0:
+                    win_flag = True
+            except Exception:
+                win_flag = False
+
+            info = {'episode': i, 'length': int(res.get('steps', 0)), 'win': bool(win_flag), 'reward': res.get('reward', 0)}
+            try:
+                if callable(progress_update):
+                    progress_update(info)
+            except Exception:
+                pass
+
+        return results
