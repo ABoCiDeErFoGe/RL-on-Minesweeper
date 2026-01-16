@@ -54,7 +54,7 @@ class DQNAgent:
         self.target_net = DQN(self.n_observations, self.n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
-        self.optimizer = optim.Adam(self.policy_net.parameters())
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR, amsgrad=True)
         self.memory = ReplayMemory(10000)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,7 +76,7 @@ class DQNAgent:
                 result = self.policy_net(state)
                 result_clone = result.clone()
                 # apply actionable mask, set non-actionable to -inf
-                actionmask = torch.tensor(self.env.game.get_actionable_mask(), dtype=torch.bool)
+                actionmask = torch.tensor(self.env.game.get_actionable_mask(), dtype=torch.bool, device=self.device)
                 result_clone[~actionmask] = -float('inf')
                 return result_clone.max(1)[1].view(1, 1)
         else:
@@ -139,3 +139,79 @@ class DQNAgent:
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.optimizer.step()
         
+    def run_episode(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0):
+        """Run one episode using the DQN policy and train during the run.
+
+        Returns a dict similar to other agents: keys `steps`, `reward`, `done`,
+        `history`, and `final_state`, plus `random_clicks`.
+        """
+        # Start a new game and obtain initial board state (2D list)
+        # Assume the difficulty is unchanged for now
+        state = self.env.reset()
+        w = self.env.game.w
+        h = self.env.game.h
+
+        steps = 0
+        total_reward = 0
+        history = []
+        done = False
+
+        # helper to convert board state (2D list) to tensor on device
+        def state_to_tensor(s):
+            flat = [int(item) for row in s for item in row]
+            t = torch.tensor([flat], dtype=torch.float32, device=self.device)
+            return t
+
+        # initial tensor
+        state_t = state_to_tensor(state)
+
+        while steps < max_steps and not done:
+            
+            action_idx = int(self.select_action(state_t).item())
+            
+            # decode action index to (x,y,mode)
+            cell_index = action_idx // 2
+            mode = 'left' if (action_idx % 2) == 0 else 'right'
+            x = (cell_index % w) + 1
+            y = (cell_index // w) + 1
+
+            # execute action in environment
+            try:
+                next_state, reward, done, info = self.env.step((x, y, mode))
+            except Exception as e:
+                # if execution failed, stop episode
+                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_clicks, "error": str(e)}
+
+            # prepare tensors for replay memory
+            action_tensor = torch.tensor([[action_idx]], dtype=torch.long, device=self.device)
+            reward_tensor = torch.tensor([float(reward)], dtype=torch.float32, device=self.device)
+            next_state_tensor = None if done else state_to_tensor(next_state)
+
+            # push transition
+            self.memory.push(state_t, action_tensor, next_state_tensor, reward_tensor)
+
+            # record history
+            history.append(((x, y, mode), reward, done))
+            total_reward += reward
+            steps += 1
+            self.steps_done += 1
+
+            # train step
+            self.optimize_model()
+
+            # soft update target network (polyak)
+            with torch.no_grad():
+                for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
+                    tp.data.mul_(1.0 - TAU)
+                    tp.data.add_(TAU * pp.data)
+
+            # advance state
+            state = next_state
+            state_t = None if done else state_to_tensor(state)
+
+            if delay and not done:
+                import time
+                time.sleep(delay)
+
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None"}
+
