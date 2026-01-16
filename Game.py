@@ -159,6 +159,44 @@ class Game:
             return -1
         # treat smile/other as ongoing
         return 0
+    
+    def get_actionable_mask(self):
+        """Return a binary mask (list) of actionable actions for every cell.
+
+        The mask is row-major and contains 2 entries per cell in the order
+        [left0, right0, left1, right1, ...]. For each cell:
+          - unrevealed (value == -1): left=1, right=1
+          - flagged (value in {-2, -11}): left=0, right=1
+          - revealed or any other value: left=0, right=0
+
+        Returns:
+            List[int]: length == w * h * 2 with values 0 or 1.
+        """
+        state = self.get_game_state()
+        h = len(state)
+        w = len(state[0]) if h > 0 else 0
+
+        actionmask = []
+        for rr in range(h):
+            for cc in range(w):
+                try:
+                    val = state[rr][cc]
+                except Exception:
+                    # treat missing value as non-actionable
+                    actionmask.extend([0, 0])
+                    continue
+                if isinstance(val, int) and val == -1:
+                    # unrevealed: both left and right are valid
+                    actionmask.extend([1, 1])
+                elif isinstance(val, int) and val in (-2, -11):
+                    # flagged: only right-click (toggle) is valid
+                    actionmask.extend([0, 1])
+                else:
+                    # revealed (0-8) or revealed bomb/death (-9,-10): not actionable
+                    actionmask.extend([0, 0])
+
+        return actionmask
+                    
 
 
 class MSEnv:
