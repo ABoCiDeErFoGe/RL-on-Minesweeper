@@ -14,6 +14,8 @@ then render the final state plus a click-order footer for analysis.
 import threading
 import queue
 import tkinter as tk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from playwright.sync_api import sync_playwright
 from Game import Game
 from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, CHECK_CHAR, NUMBER_COLOR_MAP
@@ -762,5 +764,109 @@ class App:
 
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
         self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+
+    def open_rl_visualization_window(self):
+        """Open a Toplevel window with two plots for RL training visualization.
+
+        - Top plot: episode length over episodes
+        - Bottom plot: win(1)/lose(0) per episode
+        """
+        try:
+            if hasattr(self, '_rl_viz') and self._rl_viz.get('window'):
+                win = self._rl_viz['window']
+                try:
+                    if win.winfo_exists():
+                        win.lift()
+                        return
+                except Exception:
+                    pass
+
+            win = tk.Toplevel(self.root)
+            win.title("RL Training")
+
+            fig = plt.Figure(figsize=(6, 4))
+            ax_len = fig.add_subplot(211)
+            ax_win = fig.add_subplot(212)
+            ax_len.set_ylabel('Episode length')
+            ax_win.set_ylabel('Win (1) / Lose (0)')
+            ax_win.set_xlabel('Episode')
+
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            self._rl_viz = {
+                'window': win,
+                'fig': fig,
+                'ax_len': ax_len,
+                'ax_win': ax_win,
+                'canvas': canvas,
+                'episodes': [],
+                'lengths': [],
+                'wins': [],
+            }
+        except Exception:
+            # fail silently; visualization is optional
+            self._rl_viz = None
+
+    def _apply_rl_update(self, info: dict):
+        """Apply a single update to the RL visualization on the GUI thread."""
+        try:
+            if not hasattr(self, '_rl_viz') or self._rl_viz is None:
+                self.open_rl_visualization_window()
+            v = self._rl_viz
+            if v is None:
+                return
+
+            ep = info.get('episode')
+            length = info.get('length', info.get('steps'))
+            # determine win: prefer explicit 'win', else use done+reward
+            win_flag = None
+            if 'win' in info:
+                win_flag = 1 if info.get('win') else 0
+            elif info.get('done') is not None:
+                if info.get('done'):
+                    win_flag = 1 if info.get('reward', 0) > 0 else 0
+
+            # derive episode number if not supplied
+            if ep is None:
+                ep = (v['episodes'][-1] + 1) if v['episodes'] else 1
+
+            v['episodes'].append(ep)
+            v['lengths'].append(length if length is not None else 0)
+            v['wins'].append(win_flag if win_flag is not None else 0)
+
+            # update plots
+            try:
+                ax1 = v['ax_len']
+                ax2 = v['ax_win']
+                ax1.clear()
+                ax1.plot(v['episodes'], v['lengths'], '-o')
+                ax1.set_ylabel('Episode length')
+                ax2.clear()
+                ax2.plot(v['episodes'], v['wins'], '-o')
+                ax2.set_ylabel('Win (1)/Lose (0)')
+                ax2.set_xlabel('Episode')
+                v['canvas'].draw_idle()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def update_rl_visualization(self, info: dict):
+        """Called by the RL agent (from any thread). Spawns a thread which schedules
+        the GUI-thread update for the visualization.
+
+        `info` should be a dict containing at least one of: `episode`, `length`/`steps`, `win`, `done`, `reward`.
+        """
+        def _worker():
+            try:
+                # schedule GUI update on main thread
+                self.root.after(0, lambda: self._apply_rl_update(info))
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
         
 App().run()
