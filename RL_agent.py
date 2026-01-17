@@ -71,27 +71,39 @@ class DQNAgent:
         eps_threshold = EPS_END + (EPS_START - EPS_END) * \
         math.exp(-1. * self.steps_done / EPS_DECAY)
 
+        # obtain actionable mask (expected flat list length == n_actions)
         actionmask = self.env.game.get_actionable_mask()
         tensor_actionmask = torch.tensor(actionmask, dtype=torch.bool, device=self.device)
 
+        # run network to get Q-values
+        with torch.no_grad():
+            result = self.policy_net(state)  # expected shape [1, n_actions]
+
+        # ensure mask shape matches result: if result is 2D and mask is 1D,
+        # unsqueeze to [1, n_actions] so boolean indexing broadcasts correctly.
+        mask = tensor_actionmask
+        if tensor_actionmask.dim() == 1 and result.dim() == 2:
+            mask = tensor_actionmask.unsqueeze(0)
+
         if sample > eps_threshold:
-            with torch.no_grad():
-                result = self.policy_net(state)
-                result_clone = result.clone()
-                # apply actionable mask, set non-actionable to -inf
-                result_clone[~tensor_actionmask] = -float('inf')
-                return result_clone.max(1)[1].view(1, 1)
+            result_clone = result.clone()
+            # apply actionable mask, set non-actionable to -inf
+            result_clone[~mask] = -float('inf')
+            return result_clone.max(1)[1].view(1, 1)
         else:
-            # select random action from actionable actions
-            valid_indices = torch.nonzero(tensor_actionmask).squeeze().tolist()
-            if isinstance(valid_indices, int):
-                valid_indices = [valid_indices]
-            chosen_index = random.choice(valid_indices)
+            # select random action from actionable actions (use first row if 2D)
+            if mask.dim() == 2:
+                valid = torch.nonzero(mask[0]).squeeze().tolist()
+            else:
+                valid = torch.nonzero(mask).squeeze().tolist()
+            if isinstance(valid, int):
+                valid = [valid]
+            chosen_index = random.choice(valid)
             return torch.tensor([[chosen_index]], device=self.device, dtype=torch.long)
             
     def select_action_tuple(self, state, epsilon = 0.1):
         '''Select action as (x, y, mode) tuple'''
-        action_index = self.select_action(state, epsilon).item()
+        action_index = self.select_action(state).item()
         cell_index = action_index // 2
         mode = 'left' if action_index % 2 == 0 else 'right'
 
@@ -146,7 +158,7 @@ class DQNAgent:
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.optimizer.step()
         
-    def run_episode(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0):
+    def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
         """Run one episode using the DQN policy and train during the run.
 
         Returns a dict similar to other agents: keys `steps`, `reward`, `done`,
@@ -220,7 +232,7 @@ class DQNAgent:
                 import time
                 time.sleep(delay)
 
-        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None"}
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None", 'win': info.get('win', False)}
 
     def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
         """Run `num_episodes` episodes sequentially and call `progress_update(info)` after each.
@@ -241,12 +253,12 @@ class DQNAgent:
             # determine win flag
             win_flag = False
             try:
-                if res.get('done', False) and res.get('reward', 0) > 0:
+                if res.get('win', False) and res.get('reward', 0) > 0:
                     win_flag = True
             except Exception:
                 win_flag = False
 
-            info = {'episode': i, 'length': int(res.get('steps', 0)), 'win': bool(win_flag), 'reward': res.get('reward', 0)}
+            info = {'episode': i, 'length': len(res.get('history', [])), 'win': bool(win_flag), 'reward': res.get('reward', 0)}
             try:
                 if callable(progress_update):
                     progress_update(info)

@@ -369,6 +369,38 @@ class App:
             run_kwargs=rw,
         )
 
+    def _run_rl_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None):
+        """Run the DQN RL agent for `episodes` and report progress via App.update_rl_visualization.
+
+        This runs on the Playwright worker thread and uses `run_num_episodes`'s
+        `progress_update` callback to stream per-episode info back to the GUI.
+        """
+        import importlib
+        from Game import MSEnv
+
+        mod = importlib.import_module('RL_agent')
+        AgentClass = getattr(mod, 'DQNAgent')
+
+        env = MSEnv(self.game)
+        agent = AgentClass(env)
+
+        # ensure the GUI visualization window is open (safe to call from worker)
+        try:
+            # schedule opening on GUI thread
+            self.root.after(0, lambda: self.open_rl_visualization_window())
+        except Exception:
+            pass
+
+        # call run_num_episodes and pass our update method as the progress callback
+        results = agent.run_num_episodes(int(episodes), difficulty=difficulty, max_steps=max_steps, delay=delay, progress_update=self.update_rl_visualization)
+
+        # collect final_state from last result if present
+        final_state = None
+        if isinstance(results, list) and results:
+            final_state = results[-1].get('final_state') if isinstance(results[-1], dict) else None
+
+        return {'episodes': int(episodes), 'results': results, 'final_state': final_state}
+
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
         """Generic worker-side adaptor to run any agent class.
 
@@ -667,6 +699,44 @@ class App:
             'Baseline agent',
         )
 
+    def start_rl_agent(self, max_steps: int = 100000, delay: float = 0.0):
+        """Enqueue the RL agent training run on the Playwright worker and show visualization."""
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+
+        # open visualization window immediately
+        try:
+            self.open_rl_visualization_window()
+        except Exception:
+            pass
+
+        # determine difficulty and episodes (custom entry takes precedence)
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        episodes = None
+        try:
+            custom = self._episodes_entry.get().strip()
+            if custom:
+                episodes = int(custom)
+        except Exception:
+            episodes = None
+
+        if episodes is None:
+            try:
+                episodes = int(self._episodes_var.get())
+            except Exception:
+                episodes = 1
+
+        if episodes <= 0:
+            self.update_status("Status: Invalid episodes number")
+            return
+
+        self._enqueue_agent(
+            self._run_rl_agent,
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'RL agent'},
+            'RL agent',
+        )
+
     def _on_difficulty_selected(self, label: str):
         """GUI callback when a difficulty is chosen from the dropdown.
 
@@ -748,6 +818,7 @@ class App:
         tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Random Agent", command=lambda: self.start_random_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Baseline Agent", command=lambda: self.start_baseline_agent()).pack(fill="x", pady=2)
+        tk.Button(self.sidebar, text="Train RL Agent", command=lambda: self.start_rl_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
         
