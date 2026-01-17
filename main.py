@@ -370,7 +370,7 @@ class App:
         )
 
     def _run_rl_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None):
-        """Run the DQN RL agent for `episodes` and report progress via App.update_rl_visualization.
+        """Run the DQN RL agent for `episodes` and report progress via App.update_agent_visualization.
 
         This runs on the Playwright worker thread and uses `run_num_episodes`'s
         `progress_update` callback to stream per-episode info back to the GUI.
@@ -387,12 +387,12 @@ class App:
         # ensure the GUI visualization window is open (safe to call from worker)
         try:
             # schedule opening on GUI thread
-            self.root.after(0, lambda: self.open_rl_visualization_window())
+            self.root.after(0, lambda: self.open_agent_visualization_window())
         except Exception:
             pass
 
-        # call run_num_episodes and pass our update method as the progress callback
-        results = agent.run_num_episodes(int(episodes), difficulty=difficulty, max_steps=max_steps, delay=delay, progress_update=self.update_rl_visualization)
+        # call run_num_episodes and pass our generalized update method as the progress callback
+        results = agent.run_num_episodes(int(episodes), difficulty=difficulty, max_steps=max_steps, delay=delay, progress_update=self.update_agent_visualization)
 
         # collect final_state from last result if present
         final_state = None
@@ -438,6 +438,11 @@ class App:
         # run multiple episodes sequentially and collect results
         results = []
         final_state = None
+        # open the generalized visualization window once before running multiple episodes
+        try:
+            self.root.after(0, lambda: self.open_agent_visualization_window())
+        except Exception:
+            pass
         for i in range(episodes):
             res = agent.run_episode(**run_kwargs)
             results.append(res)
@@ -459,6 +464,26 @@ class App:
                     t = threading.Thread(target=_do_notify, daemon=True)
                     t.start()
                 _notify_thread(idx, res, episodes)
+            except Exception:
+                pass
+
+            # also send a visualization update for this episode (non-blocking)
+            try:
+                info = None
+                if isinstance(res, dict):
+                    # prefer explicit steps, else compute from history
+                    steps = res.get('steps') if isinstance(res.get('steps', None), int) else (len(res.get('history', [])) if isinstance(res.get('history', None), list) else None)
+                    info = {'episode': idx, 'length': steps, 'reward': res.get('reward'), 'done': res.get('done', False), "random_clicks": res.get('random_clicks', res.get('random_click', 0))}
+                    # include explicit win flag if present
+                    if 'win' in res:
+                        info['win'] = bool(res.get('win'))
+                else:
+                    info = {'episode': idx}
+                try:
+                    # schedule the visualization update from worker thread
+                    self.update_agent_visualization(info)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -707,7 +732,7 @@ class App:
 
         # open visualization window immediately
         try:
-            self.open_rl_visualization_window()
+            self.open_agent_visualization_window()
         except Exception:
             pass
 
@@ -836,7 +861,7 @@ class App:
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
         self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
 
-    def open_rl_visualization_window(self):
+    def open_agent_visualization_window(self):
         """Open a Toplevel window with two plots for RL training visualization.
 
         - Top plot: episode length over episodes
@@ -855,12 +880,16 @@ class App:
             win = tk.Toplevel(self.root)
             win.title("RL Training")
 
-            fig = plt.Figure(figsize=(6, 4))
-            ax_len = fig.add_subplot(211)
-            ax_win = fig.add_subplot(212)
+            fig = plt.Figure(figsize=(6, 8))
+            ax_len = fig.add_subplot(411)
+            ax_win = fig.add_subplot(412)
+            ax_reward = fig.add_subplot(413)
+            ax_random = fig.add_subplot(414)
             ax_len.set_ylabel('Episode length')
             ax_win.set_ylabel('Win (1) / Lose (0)')
-            ax_win.set_xlabel('Episode')
+            ax_reward.set_ylabel('Reward')
+            ax_random.set_ylabel('Random clicks')
+            ax_random.set_xlabel('Episode')
 
             canvas = FigureCanvasTkAgg(fig, master=win)
             canvas.draw()
@@ -871,26 +900,37 @@ class App:
                 'fig': fig,
                 'ax_len': ax_len,
                 'ax_win': ax_win,
+                'ax_reward': ax_reward,
+                'ax_random': ax_random,
                 'canvas': canvas,
                 'episodes': [],
                 'lengths': [],
                 'wins': [],
+                'rewards': [],
+                'randoms': [],
             }
         except Exception:
             # fail silently; visualization is optional
             self._rl_viz = None
 
-    def _apply_rl_update(self, info: dict):
-        """Apply a single update to the RL visualization on the GUI thread."""
+    def _apply_agent_update(self, info: dict):
+        """Apply a single update to the agent training visualization on the GUI thread."""
         try:
             if not hasattr(self, '_rl_viz') or self._rl_viz is None:
-                self.open_rl_visualization_window()
+                self.open_agent_visualization_window()
             v = self._rl_viz
             if v is None:
                 return
 
             ep = info.get('episode')
             length = info.get('length', info.get('steps'))
+            reward = info.get('reward')
+            # random clicks: support multiple key names
+            random_clicks = None
+            if 'random_clicks' in info:
+                random_clicks = info.get('random_clicks')
+            elif 'random_click' in info:
+                random_clicks = info.get('random_click')
             # determine win: prefer explicit 'win', else use done+reward
             win_flag = None
             if 'win' in info:
@@ -906,26 +946,44 @@ class App:
             v['episodes'].append(ep)
             v['lengths'].append(length if length is not None else 0)
             v['wins'].append(win_flag if win_flag is not None else 0)
+            v['rewards'].append(reward if reward is not None else (info.get('reward', 0) if info.get('reward', None) is not None else 0))
+            v['randoms'].append(int(random_clicks) if random_clicks is not None else 0)
 
             # update plots
             try:
                 ax1 = v['ax_len']
                 ax2 = v['ax_win']
+                ax3 = v.get('ax_reward')
                 ax1.clear()
                 ax1.plot(v['episodes'], v['lengths'], '-o')
                 ax1.set_ylabel('Episode length')
                 ax2.clear()
-                ax2.plot(v['episodes'], v['wins'], '-o')
+                # plot wins as isolated points (no connecting line)
+                ax2.plot(v['episodes'], v['wins'], linestyle='None', marker='o')
                 ax2.set_ylabel('Win (1)/Lose (0)')
-                ax2.set_xlabel('Episode')
+                if ax3 is not None:
+                    ax3.clear()
+                    ax3.plot(v['episodes'], v['rewards'], '-o')
+                    ax3.set_ylabel('Reward')
+                    ax3.set_xlabel('Episode')
+                # random clicks subplot
+                try:
+                    ar = v.get('ax_random')
+                    if ar is not None:
+                        ar.clear()
+                        ar.plot(v['episodes'], v['randoms'], '-o')
+                        ar.set_ylabel('Random clicks')
+                        ar.set_xlabel('Episode')
+                except Exception:
+                    pass
                 v['canvas'].draw_idle()
             except Exception:
                 pass
         except Exception:
             pass
 
-    def update_rl_visualization(self, info: dict):
-        """Called by the RL agent (from any thread). Spawns a thread which schedules
+    def update_agent_visualization(self, info: dict):
+        """Called by an agent (from any thread). Spawns a thread which schedules
         the GUI-thread update for the visualization.
 
         `info` should be a dict containing at least one of: `episode`, `length`/`steps`, `win`, `done`, `reward`.
@@ -933,7 +991,7 @@ class App:
         def _worker():
             try:
                 # schedule GUI update on main thread
-                self.root.after(0, lambda: self._apply_rl_update(info))
+                self.root.after(0, lambda: self._apply_agent_update(info))
             except Exception:
                 pass
 
