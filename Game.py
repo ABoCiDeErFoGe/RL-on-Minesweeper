@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 import numpy as np
-from config import REWARD_BOMB_DEATH, REWARD_STEP, REWARD_WIN
+from config import REWARD_BOMB_DEATH, REWARD_STEP, REWARD_UNFLAG, REWARD_WIN
 
 
 class Game:
@@ -244,6 +244,17 @@ class MSEnv:
         else:
             raise ValueError("mode must be 'left' or 'right'")
 
+
+        # if the agent choose to unflagged a bomb, penealized the agent
+        # if the cell after action is unrevealed, meaning the cell was flagged before
+        if mode == "right":
+            cell_value = state[y - 1][x - 1]
+            if cell_value == -1:
+                reward = REWARD_UNFLAG
+                done = False
+                info = {}
+                return state, reward, done, info
+
         # prefer checking the page face for definitive result (win/loss)
         result = self.game.get_result()
         if result == 1:
@@ -253,10 +264,9 @@ class MSEnv:
             done = True
             reward = REWARD_BOMB_DEATH
         else:
-            # fallback: inspect state for bomb death squares
-            done = any(-10 in row for row in state)
-            reward = REWARD_BOMB_DEATH if done else REWARD_STEP
-        info = {}
+            done = False
+            reward = REWARD_STEP if mode == "left" else 0
+        info = {'win': (result == 1)}
         return state, reward, done, info
 
         
