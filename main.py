@@ -134,9 +134,6 @@ class App:
             lbl.bind("<Button-3>", lambda _e, r=rr, c=cc: self.on_right_click(r, c))
         return lbl
 
-    def on_click(self):
-        self.page.locator("text=More information").click()
-
     def on_close(self):
         # Signal the worker thread to stop Playwright and wait for it to exit
         self.update_status("Status: Exiting...")
@@ -666,25 +663,9 @@ class App:
         # determine difficulty from UI selection and enqueue agent
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         # determine episodes: custom entry takes precedence
-        episodes = None
-        try:
-            custom = self._episodes_entry.get().strip()
-            if custom:
-                episodes = int(custom)
-        except Exception:
-            episodes = None
-
-        if episodes is None:
-            try:
-                episodes = int(self._episodes_var.get())
-            except Exception:
-                episodes = 1
-
-        # validate
-        if episodes <= 0:
-            self.update_status("Status: Invalid episodes number")
-            return
-
+        
+        episodes = self._get_episodes_from_ui()
+        
         self._enqueue_agent(
             self._run_random_agent,
             {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob, 'episodes': episodes, 'agent_name': 'Random agent'},
@@ -700,24 +681,9 @@ class App:
         # determine difficulty from UI selection and enqueue agent
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         # determine episodes
-        episodes = None
-        try:
-            custom = self._episodes_entry.get().strip()
-            if custom:
-                episodes = int(custom)
-        except Exception:
-            episodes = None
-
-        if episodes is None:
-            try:
-                episodes = int(self._episodes_var.get())
-            except Exception:
-                episodes = 1
-
-        if episodes <= 0:
-            self.update_status("Status: Invalid episodes number")
-            return
-
+        
+        episodes = self._get_episodes_from_ui()
+        
         self._enqueue_agent(
             self._run_baseline_agent,
             {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'Baseline agent'},
@@ -738,23 +704,7 @@ class App:
 
         # determine difficulty and episodes (custom entry takes precedence)
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
-        episodes = None
-        try:
-            custom = self._episodes_entry.get().strip()
-            if custom:
-                episodes = int(custom)
-        except Exception:
-            episodes = None
-
-        if episodes is None:
-            try:
-                episodes = int(self._episodes_var.get())
-            except Exception:
-                episodes = 1
-
-        if episodes <= 0:
-            self.update_status("Status: Invalid episodes number")
-            return
+        episodes = self._get_episodes_from_ui()
 
         self._enqueue_agent(
             self._run_rl_agent,
@@ -861,15 +811,32 @@ class App:
         self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
         self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
 
-    def open_agent_visualization_window(self):
-        """Open a Toplevel window with two plots for RL training visualization.
+    def _get_episodes_from_ui(self):
+        """Read episode count from UI (custom entry or dropdown). Returns int."""
+        episodes = None
+        try:
+            custom = self._episodes_entry.get().strip()
+            if custom:
+                episodes = int(custom)
+        except Exception:
+            episodes = None
 
-        - Top plot: episode length over episodes
-        - Bottom plot: win(1)/lose(0) per episode
+        if episodes is None:
+            try:
+                episodes = int(self._episodes_var.get())
+            except Exception:
+                episodes = 1
+
+        return max(1, int(episodes))
+
+    def open_agent_visualization_window(self):
+        """Open a Toplevel window with multiple plots for agent training visualization.
+
+        Plots: episode length, win/lose scatter, reward, and random-clicks per episode.
         """
         try:
-            if hasattr(self, '_rl_viz') and self._rl_viz.get('window'):
-                win = self._rl_viz['window']
+            if hasattr(self, '_agent_viz') and self._agent_viz.get('window'):
+                win = self._agent_viz['window']
                 try:
                     if win.winfo_exists():
                         win.lift()
@@ -895,7 +862,7 @@ class App:
             canvas.draw()
             canvas.get_tk_widget().pack(fill='both', expand=True)
 
-            self._rl_viz = {
+            self._agent_viz = {
                 'window': win,
                 'fig': fig,
                 'ax_len': ax_len,
@@ -911,14 +878,14 @@ class App:
             }
         except Exception:
             # fail silently; visualization is optional
-            self._rl_viz = None
+            self._agent_viz = None
 
     def _apply_agent_update(self, info: dict):
         """Apply a single update to the agent training visualization on the GUI thread."""
         try:
-            if not hasattr(self, '_rl_viz') or self._rl_viz is None:
+            if not hasattr(self, '_agent_viz') or self._agent_viz is None:
                 self.open_agent_visualization_window()
-            v = self._rl_viz
+            v = self._agent_viz
             if v is None:
                 return
 
@@ -955,27 +922,34 @@ class App:
                 ax2 = v['ax_win']
                 ax3 = v.get('ax_reward')
                 ax1.clear()
-                ax1.plot(v['episodes'], v['lengths'], '-o')
+                # line for trend (neutral gray), then colored points for wins/losses
+                ax1.plot(v['episodes'], v['lengths'], color='0.75', linewidth=1)
+                colors = ['green' if w else 'red' for w in v['wins']]
+                ax1.scatter(v['episodes'], v['lengths'], c=colors, edgecolors='k')
                 ax1.set_ylabel('Episode length')
+
+                # win/loss histogram
                 ax2.clear()
-                # plot wins as isolated points (no connecting line)
-                ax2.plot(v['episodes'], v['wins'], linestyle='None', marker='o')
-                ax2.set_ylabel('Win (1)/Lose (0)')
+                wins_list = v['wins']
+                num_wins = sum(1 for w in wins_list if w)
+                num_losses = len(wins_list) - num_wins
+                ax2.bar(['Lose', 'Win'], [num_losses, num_wins], color=['red', 'green'])
+                ax2.set_ylabel('Count')
+
                 if ax3 is not None:
                     ax3.clear()
-                    ax3.plot(v['episodes'], v['rewards'], '-o')
+                    ax3.plot(v['episodes'], v['rewards'], color='0.75', linewidth=1)
+                    ax3.scatter(v['episodes'], v['rewards'], c=colors, edgecolors='k')
                     ax3.set_ylabel('Reward')
                     ax3.set_xlabel('Episode')
-                # random clicks subplot
-                try:
-                    ar = v.get('ax_random')
-                    if ar is not None:
-                        ar.clear()
-                        ar.plot(v['episodes'], v['randoms'], '-o')
-                        ar.set_ylabel('Random clicks')
-                        ar.set_xlabel('Episode')
-                except Exception:
-                    pass
+                # random clicks subplot (draw trend and colored points by win/loss)
+                ar = v.get('ax_random')
+                if ar is not None:
+                    ar.clear()
+                    ar.plot(v['episodes'], v['randoms'], color='0.75', linewidth=1)
+                    ar.scatter(v['episodes'], v['randoms'], c=colors, edgecolors='k')
+                    ar.set_ylabel('Random clicks')
+                    ar.set_xlabel('Episode')
                 v['canvas'].draw_idle()
             except Exception:
                 pass
