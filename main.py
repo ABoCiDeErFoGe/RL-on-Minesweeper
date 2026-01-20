@@ -924,7 +924,7 @@ class App:
                 ax1.clear()
                 # line for trend (neutral gray), then colored points for wins/losses
                 ax1.plot(v['episodes'], v['lengths'], color='0.75', linewidth=1)
-                colors = ['green' if w else 'red' for w in v['wins']]
+                colors = ['#11f54e' if w else 'red' for w in v['wins']]
                 ax1.scatter(v['episodes'], v['lengths'], c=colors, edgecolors='k')
                 ax1.set_ylabel('Episode length')
 

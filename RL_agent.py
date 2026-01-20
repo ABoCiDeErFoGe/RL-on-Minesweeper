@@ -48,8 +48,12 @@ class DQN(nn.Module):
 class DQNAgent:
     def __init__(self, env: MSEnv) -> None:
         self.env = env
-        self.n_actions = env.game.w * env.game.h * 2  # left/right for each cell
-        self.n_observations = env.game.w * env.game.h  # flattened board state
+        self.initialize_network()
+        
+    # reinitialize DQN based on the network
+    def initialize_network(self):
+        self.n_actions = self.env.game.w * self.env.game.h * 2  # left/right for each cell
+        self.n_observations = self.env.game.w * self.env.game.h  # flattened board state
         self.policy_net = DQN(self.n_observations, self.n_actions)
         self.target_net = DQN(self.n_observations, self.n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -166,7 +170,8 @@ class DQNAgent:
         """
         # Start a new game and obtain initial board state (2D list)
         # Assume the difficulty is unchanged for now
-        state = self.env.reset()
+        state = self.env.reset(difficulty=difficulty)
+        self.initialize_network()  # reinitialize network for new difficulty
         w = self.env.game.w
         h = self.env.game.h
 
