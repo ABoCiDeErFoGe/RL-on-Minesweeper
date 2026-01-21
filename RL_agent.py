@@ -44,8 +44,8 @@ class DQN(nn.Module):
         x = F.relu(self.layer2(x))
         x = F.relu(self.layer3(x))
         return self.layer4(x)
-    
-class DQNAgent:
+
+class RL_agent:
     def __init__(self, env: MSEnv) -> None:
         self.env = env
         self.initialize_network()
@@ -67,8 +67,7 @@ class DQNAgent:
         
         # epsilon decay parameters
         self.steps_done = 0
-        
-    
+
     def select_action(self, state):
         sample = random.random()
         
@@ -161,6 +160,10 @@ class DQNAgent:
         # In-place gradient clipping
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.optimizer.step()
+
+class DQNAgent(RL_agent):
+    def __init__(self, env: MSEnv) -> None:
+        super().__init__(env)
         
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
         """Run one episode using the DQN policy and train during the run.
