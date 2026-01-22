@@ -297,7 +297,7 @@ class Hybrid_Agent(RL_agent):
             t = torch.tensor([flat], dtype=torch.float32, device=self.device)
             return t
 
-        # 1) initial random left-click to start the board (do not record in memory)
+        # initial random left-click to start the board (do not record in memory)
         unrevealed = []
         for r in range(h):
             for c in range(w):
@@ -310,9 +310,9 @@ class Hybrid_Agent(RL_agent):
         if unrevealed:
             cx, cy = random.choice(unrevealed)
             try:
-                state, reward, done, _ = self.env.step((cx, cy, 'left'))
+                state, reward, done, info = self.env.step((cx, cy, 'left'))
             except Exception as e:
-                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e), "win": info.get('win', False)}
             history.append(((cx, cy, 'left'), reward, done))
             total_reward += reward
             steps += 1
@@ -332,15 +332,16 @@ class Hybrid_Agent(RL_agent):
                 except Exception:
                     flag_actions, click_actions = ([], [])
 
+                # if none returned, break to let DQN act
                 if not flag_actions and not click_actions:
                     break
 
                 # Execute flag actions (right clicks) first
                 for (x, y, mode) in flag_actions:
                     try:
-                        state, reward, done, _ = self.env.step((x, y, mode))
+                        state, reward, done, info = self.env.step((x, y, mode))
                     except Exception as e:
-                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False), "error": str(e)}
                     history.append(((x, y, mode), reward, done))
                     total_reward += reward
                     steps += 1
@@ -355,9 +356,9 @@ class Hybrid_Agent(RL_agent):
                 # Execute click actions (left clicks)
                 for (x, y, mode) in click_actions:
                     try:
-                        state, reward, done, _ = self.env.step((x, y, mode))
+                        state, reward, done, info = self.env.step((x, y, mode))
                     except Exception as e:
-                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False), "error": str(e)}
                     history.append(((x, y, mode), reward, done))
                     total_reward += reward
                     steps += 1
@@ -390,7 +391,7 @@ class Hybrid_Agent(RL_agent):
                 try:
                     next_state, reward, done, info = self.env.step((x, y, mode))
                 except Exception as e:
-                    return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                    return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False), "error": str(e)}
 
                 # prepare tensors for replay memory (only for DQN-decided actions)
                 action_tensor = torch.tensor([[action_idx]], dtype=torch.long, device=self.device)
@@ -426,7 +427,7 @@ class Hybrid_Agent(RL_agent):
                 # if select_action or training fails, stop safely
                 break
 
-        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click}
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False)}
     
     def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
         """Run `num_episodes` episodes using the hybrid policy and call
@@ -442,7 +443,7 @@ class Hybrid_Agent(RL_agent):
             # determine win flag
             win_flag = False
             try:
-                if res.get('win', False) and res.get('reward', 0) > 0:
+                if res.get('win', False):
                     win_flag = True
             except Exception:
                 win_flag = False

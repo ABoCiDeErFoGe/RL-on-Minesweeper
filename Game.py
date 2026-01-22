@@ -232,11 +232,19 @@ class MSEnv:
         # validate action
         try:
             x, y, mode = action
+            # if trying to operate on already revealed cell, no-op
+            state_check = self.game.get_game_state()
+            cell_value = state_check[y - 1][x - 1]
+            if cell_value >= 0:
+                # already revealed; no-op
+                return state_check, 0, False, {}
         except Exception:
             raise ValueError("Action must be a tuple (x, y, mode)")
 
         if mode == "left":
+            prev_state = self.game.get_game_state()
             state = self.game.handle_click(x, y)
+            after_state = self.game.get_game_state()
         elif mode == "right":
             # perform right click (flag/unflag)
             self.game.handle_right_click(x, y)
@@ -244,29 +252,40 @@ class MSEnv:
         else:
             raise ValueError("mode must be 'left' or 'right'")
 
+        reward = 0
+        done = False
+
+        result = self.game.get_result()
 
         # if the agent choose to unflagged a bomb, penealized the agent
         # if the cell after action is unrevealed, meaning the cell was flagged before
         if mode == "right":
             cell_value = state[y - 1][x - 1]
             if cell_value == -1:
-                reward = REWARD_UNFLAG
+                reward += REWARD_UNFLAG
                 done = False
-                info = {}
-                return state, reward, done, info
-
-        # prefer checking the page face for definitive result (win/loss)
-        result = self.game.get_result()
+                return state, reward, done, {}
+        
+        if mode == "left":
+            # award the agent the percentage of cells revealed after action
+            prev_unrevealed = sum(cell == -1 for row in prev_state for cell in row)
+            after_unrevealed = sum(cell == -1 for row in after_state for cell in row)
+            reward += (prev_unrevealed - after_unrevealed) / (prev_unrevealed + 1e-5)  # avoid div by zero
+               
         if result == 1:
+            print("Game won!")
             done = True
-            reward = REWARD_WIN
+            reward += REWARD_WIN
         elif result == -1:
+            print("Game lost!")
             done = True
-            reward = REWARD_BOMB_DEATH
+            reward += REWARD_BOMB_DEATH
         else:
             done = False
-            reward = REWARD_STEP if mode == "left" else 0
+            reward += REWARD_STEP if mode == "left" else 0
+
         info = {'win': (result == 1)}
+
         return state, reward, done, info
 
         

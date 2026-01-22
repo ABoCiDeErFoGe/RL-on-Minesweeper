@@ -947,19 +947,11 @@ class App:
             length = info.get('length', info.get('steps'))
             reward = info.get('reward')
             # random clicks: support multiple key names
-            random_clicks = None
-            if 'random_clicks' in info:
-                random_clicks = info.get('random_clicks')
-            elif 'random_click' in info:
-                random_clicks = info.get('random_click')
-            # determine win: prefer explicit 'win', else use done+reward
-            win_flag = None
-            if 'win' in info:
-                win_flag = 1 if info.get('win') else 0
-            elif info.get('done') is not None:
-                if info.get('done'):
-                    win_flag = 1 if info.get('reward', 0) > 0 else 0
+            random_clicks = info.get("random_clicks", info.get("random_click", None))
 
+            # determine win: prefer explicit 'win', else use done+reward
+            win_flag = 1 if info.get('win') else 0
+            
             # derive episode number if not supplied
             if ep is None:
                 ep = (v['episodes'][-1] + 1) if v['episodes'] else 1
