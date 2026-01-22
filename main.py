@@ -398,6 +398,39 @@ class App:
 
         return {'episodes': int(episodes), 'results': results, 'final_state': final_state}
 
+    def _run_hybrid_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None):
+        """Run the Hybrid_Agent which combines the baseline agent with DQN.
+
+        Instantiates `BaselineAgent` and passes it to `Hybrid_Agent`.
+        """
+        import importlib
+        from Game import MSEnv
+
+        mod = importlib.import_module('RL_agent')
+        AgentClass = getattr(mod, 'Hybrid_Agent')
+
+        # import baseline agent class
+        base_mod = importlib.import_module('baseline_agent')
+        BaselineClass = getattr(base_mod, 'BaselineAgent')
+
+        env = MSEnv(self.game)
+        baseline = BaselineClass(env)
+        agent = AgentClass(env, baseline)
+
+        # ensure the GUI visualization window is open (safe to call from worker)
+        try:
+            self.root.after(0, lambda: self.open_agent_visualization_window())
+        except Exception:
+            pass
+
+        results = agent.run_num_episodes(int(episodes), difficulty=difficulty, max_steps=max_steps, delay=delay, progress_update=self.update_agent_visualization)
+
+        final_state = None
+        if isinstance(results, list) and results:
+            final_state = results[-1].get('final_state') if isinstance(results[-1], dict) else None
+
+        return {'episodes': int(episodes), 'results': results, 'final_state': final_state}
+
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
         """Generic worker-side adaptor to run any agent class.
 
@@ -712,6 +745,26 @@ class App:
             'RL agent',
         )
 
+    def start_hybrid_agent(self, max_steps: int = 100000, delay: float = 0.0):
+        """Enqueue the Hybrid agent (baseline + DQN) to run on the Playwright worker."""
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+
+        try:
+            self.open_agent_visualization_window()
+        except Exception:
+            pass
+
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        episodes = self._get_episodes_from_ui()
+
+        self._enqueue_agent(
+            self._run_hybrid_agent,
+            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'Hybrid agent'},
+            'Hybrid agent'
+        )
+
     def _on_difficulty_selected(self, label: str):
         """GUI callback when a difficulty is chosen from the dropdown.
 
@@ -794,6 +847,7 @@ class App:
         tk.Button(self.sidebar, text="Random Agent", command=lambda: self.start_random_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Baseline Agent", command=lambda: self.start_baseline_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Train RL Agent", command=lambda: self.start_rl_agent()).pack(fill="x", pady=2)
+        tk.Button(self.sidebar, text="Hybrid Agent", command=lambda: self.start_hybrid_agent()).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
         tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
         

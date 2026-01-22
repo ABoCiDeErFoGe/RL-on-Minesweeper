@@ -22,7 +22,7 @@ NUMBER_COLOR_MAP = {
 
 # Rewards for RL environment (tweakable)
 REWARD_BOMB_DEATH = -1
-REWARD_UNFLAG = -0.1
+REWARD_UNFLAG = -0.2
 REWARD_STEP = 0.01
 REWARD_WIN = 1
 
