@@ -274,3 +274,158 @@ class DQNAgent(RL_agent):
                 pass
 
         return results
+
+class Hybrid_Agent(RL_agent):
+    def __init__(self, env: MSEnv, baseline_agent) -> None:
+        super().__init__(env)
+        self.baseline_agent = baseline_agent
+        
+    def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
+                
+        state = self.env.reset(difficulty)
+        w = self.env.game.w
+        h = self.env.game.h
+
+        steps = 0
+        total_reward = 0
+        history = []
+        done = False
+        random_click = 0
+        # helper to convert board state (2D list) to tensor on device
+        def state_to_tensor(s):
+            flat = [int(item) for row in s for item in row]
+            t = torch.tensor([flat], dtype=torch.float32, device=self.device)
+            return t
+
+        # 1) initial random left-click to start the board (do not record in memory)
+        unrevealed = []
+        for r in range(h):
+            for c in range(w):
+                try:
+                    v = state[r][c]
+                except Exception:
+                    v = -1
+                if v < 0:
+                    unrevealed.append((c + 1, r + 1))
+        if unrevealed:
+            cx, cy = random.choice(unrevealed)
+            try:
+                state, reward, done, _ = self.env.step((cx, cy, 'left'))
+            except Exception as e:
+                return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+            history.append(((cx, cy, 'left'), reward, done))
+            total_reward += reward
+            steps += 1
+            random_click += 1
+            if delay and not done:
+                import time
+                time.sleep(delay)
+
+        # Main loop: alternate baseline-rule actions and DQN actions
+        state_t = state_to_tensor(state)
+
+        while steps < max_steps and not done:
+            # Apply baseline-agent deterministic actions repeatedly until none returned
+            while True:
+                try:
+                    flag_actions, click_actions = self.baseline_agent.select_action(state)
+                except Exception:
+                    flag_actions, click_actions = ([], [])
+
+                if not flag_actions and not click_actions:
+                    break
+
+                # Execute flag actions (right clicks) first
+                for (x, y, mode) in flag_actions:
+                    try:
+                        state, reward, done, _ = self.env.step((x, y, mode))
+                    except Exception as e:
+                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                    history.append(((x, y, mode), reward, done))
+                    total_reward += reward
+                    steps += 1
+                    if delay and not done:
+                        import time
+                        time.sleep(delay)
+                    if done or steps >= max_steps:
+                        break
+                if done or steps >= max_steps:
+                    break
+
+                # Execute click actions (left clicks)
+                for (x, y, mode) in click_actions:
+                    try:
+                        state, reward, done, _ = self.env.step((x, y, mode))
+                    except Exception as e:
+                        return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+                    history.append(((x, y, mode), reward, done))
+                    total_reward += reward
+                    steps += 1
+                    if delay and not done:
+                        import time
+                        time.sleep(delay)
+                    if done or steps >= max_steps:
+                        break
+
+                if done or steps >= max_steps:
+                    break
+
+                # loop to run baseline.select_action again
+
+            if done or steps >= max_steps:
+                break
+
+            # Baseline produced no actions: let DQN decide next action
+            try:
+                # prepare tensors
+                state_t = state_to_tensor(state)
+                action_idx = int(self.select_action(state_t).item())
+                # decode to (x,y,mode)
+                cell_index = action_idx // 2
+                mode = 'left' if (action_idx % 2) == 0 else 'right'
+                x = (cell_index % w) + 1
+                y = (cell_index // w) + 1
+
+                # execute action in environment
+                try:
+                    next_state, reward, done, info = self.env.step((x, y, mode))
+                except Exception as e:
+                    return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "error": str(e)}
+
+                # prepare tensors for replay memory (only for DQN-decided actions)
+                action_tensor = torch.tensor([[action_idx]], dtype=torch.long, device=self.device)
+                reward_tensor = torch.tensor([float(reward)], dtype=torch.float32, device=self.device)
+                next_state_tensor = None if done else state_to_tensor(next_state)
+
+                # push transition to memory
+                self.memory.push(state_t, action_tensor, next_state_tensor, reward_tensor)
+
+                # record history and stats
+                history.append(((x, y, mode), reward, done))
+                # DQN-decided action; count as a random/dqn click
+                random_click += 1
+                total_reward += reward
+                steps += 1
+                self.steps_done += 1
+
+                # train step and soft update
+                self.optimize_model()
+                with torch.no_grad():
+                    for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
+                        tp.data.mul_(1.0 - TAU)
+                        tp.data.add_(TAU * pp.data)
+
+                # advance state
+                state = next_state
+                state_t = None if done else state_to_tensor(state)
+
+                if delay and not done:
+                    import time
+                    time.sleep(delay)
+            except Exception:
+                # if select_action or training fails, stop safely
+                break
+
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click}
+        
+        
