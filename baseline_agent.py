@@ -50,6 +50,67 @@ class BaselineAgent:
     def __init__(self, env: MSEnv) -> None:
         self.env = env
 
+    def select_action(self, state: List[List[int]]) -> Tuple[List[Tuple[int, int, str]] , List[Tuple[int, int, str]]]:
+        # Scan the board for a cell where we can place a flag based on local rules.
+        w = self.env.game.w
+        h = self.env.game.h
+        
+         # Collect candidate actions for this step. Actions are tuples (x, y, mode)
+        # where x,y are 1-based coordinates and mode is 'left' or 'right'
+        actions = []
+
+        # Scan every revealed numbered cell and check local constraints
+        for r in range(h):
+            for c in range(w):
+                try:
+                    val = state[r][c]
+                except Exception:
+                    val = -1
+                # only interested in revealed numbered cells (0..8)
+                if not isinstance(val, int) or val <= 0:
+                    continue
+                
+                neigh = _neighbors(r, c, w, h)
+                blanks = []
+                flags = 0
+                # Count blanks (unrevealed) and flags around this cell
+                for (nr, nc) in neigh:
+                    try:
+                        v = state[nr][nc]
+                    except Exception:
+                        v = -1
+                    if v == -1:
+                        blanks.append((nr, nc))
+                    if v in (-2, -11):
+                        flags += 1
+
+                req = val - flags
+
+                # If the remaining required flags equal the number of blank
+                # neighbors, we can safely place flags on every blank.
+                if req > 0 and len(blanks) == req:
+                    for (nr, nc) in blanks:
+                        actions.append((nc + 1, nr + 1, 'right'))  # convert to 1-based
+                if val == flags and len(blanks) > 0:
+                    for (nr, nc) in blanks:
+                        actions.append((nc + 1, nr + 1, 'left'))  # convert to 1-based
+
+            # Deduplicate actions while preserving order
+            seen = set()
+            dedup_flag_actions = []
+            dedup_click_actions = []
+            for (x, y, m) in actions:
+                key = (x, y, m)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if m == 'right':
+                    dedup_flag_actions.append((x, y, m))
+                else:
+                    dedup_click_actions.append((x, y, m))
+
+        return (dedup_flag_actions, dedup_click_actions)
+    
     def run_episode(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0) -> Dict[str, Any]:
         # Start a new game (or reuse default difficulty) and obtain initial board.
         # `state` is a 2D list of ints as returned by Game.get_game_state().
@@ -67,61 +128,9 @@ class BaselineAgent:
         while steps < max_steps and not done:
             # Collect candidate actions for this step. Actions are tuples (x, y, mode)
             # where x,y are 1-based coordinates and mode is 'left' or 'right'.
-            actions: List[Tuple[int, int, str]] = []  # (x, y, mode) 1-based
-
-            # Scan every revealed numbered cell and check local constraints
-            for r in range(h):
-                for c in range(w):
-                    try:
-                        val = state[r][c]
-                    except Exception:
-                        # if state indexing fails, treat as unrevealed
-                        val = -1
-
-                    # We're only interested in revealed numbered cells (0..8)
-                    if not isinstance(val, int) or val <= 0:
-                        continue
-
-                    neigh = _neighbors(r, c, w, h)
-                    blanks = []
-                    flags = 0
-                    # Count blanks (unrevealed) and flags around this cell
-                    for (nr, nc) in neigh:
-                        try:
-                            v = state[nr][nc]
-                        except Exception:
-                            v = -1
-                        if v == -1:
-                            blanks.append((nr, nc))
-                        if v in (-2, -11):
-                            flags += 1
-
-                    # Number of additional flags required for this cell
-                    req = val - flags
-
-                    # If the remaining required flags equal the number of blank
-                    # neighbors, we can safely place flags on every blank.
-                    if req > 0 and len(blanks) == req:
-                        for (nr, nc) in blanks:
-                            # convert to 1-based (x, y)
-                            actions.append((nc + 1, nr + 1, 'right'))
-
-                    # If we've already flagged exactly `val` bombs around this
-                    # cell, all other unrevealed neighbors are safe to open.
-                    if val == flags and len(blanks) > 0:
-                        for (nr, nc) in blanks:
-                            actions.append((nc + 1, nr + 1, 'left'))
-
-            # Deduplicate actions while preserving order
-            seen = set()
-            dedup_actions = []
-            for (x, y, m) in actions:
-                key = (x, y, m)
-                if key in seen:
-                    continue
-                seen.add(key)
-                dedup_actions.append((x, y, m))
-
+            (flag_actions, click_actions) = self.select_action(state)
+            
+            dedup_actions = flag_actions + click_actions
             # If no deterministic actions found, pick a random unrevealed cell
             if not dedup_actions:
                 unrevealed = []
