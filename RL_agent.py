@@ -427,5 +427,33 @@ class Hybrid_Agent(RL_agent):
                 break
 
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click}
+    
+    def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
+        """Run `num_episodes` episodes using the hybrid policy and call
+        `progress_update(info)` after each episode (same contract as DQNAgent).
+
+        Returns a list of per-episode result dicts.
+        """
+        results = []
+        for i in range(1, int(num_episodes) + 1):
+            res = self.run_episode(difficulty=difficulty, max_steps=max_steps, delay=delay)
+            results.append(res)
+
+            # determine win flag
+            win_flag = False
+            try:
+                if res.get('win', False) and res.get('reward', 0) > 0:
+                    win_flag = True
+            except Exception:
+                win_flag = False
+
+            info = {'episode': i, 'length': len(res.get('history', [])), 'win': bool(win_flag), 'reward': res.get('reward', 0), 'random_clicks': res.get('random_clicks', res.get('random_click', 0))}
+            try:
+                if callable(progress_update):
+                    progress_update(info)
+            except Exception:
+                pass
+
+        return results
         
         
