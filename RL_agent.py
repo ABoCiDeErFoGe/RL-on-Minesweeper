@@ -30,20 +30,29 @@ class ReplayMemory(object):
         return len(self.memory)
     
 class DQN(nn.Module):
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, in_channels, height, width, n_actions):
         super(DQN, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, 128)
-        self.layer4 = nn.Linear(128, n_actions)
+        # simple conv stack that preserves spatial dims (padding=1)
+        self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+
+        # compute flattened size after convs (padding keeps h,w)
+        conv_output_size = 64 * height * width
+
+        self.fc1 = nn.Linear(conv_output_size, 512)
+        self.fc2 = nn.Linear(512, n_actions)
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
-        x = F.relu(self.layer1(x))
-        x = F.relu(self.layer2(x))
-        x = F.relu(self.layer3(x))
-        return self.layer4(x)
+        # x expected shape: [batch, channels=1, H, W]
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
 
 class RL_agent:
     def __init__(self, env: MSEnv) -> None:
@@ -52,10 +61,13 @@ class RL_agent:
         
     # reinitialize DQN based on the network
     def initialize_network(self):
-        self.n_actions = self.env.game.w * self.env.game.h * 2  # left/right for each cell
-        self.n_observations = self.env.game.w * self.env.game.h  # flattened board state
-        self.policy_net = DQN(self.n_observations, self.n_actions)
-        self.target_net = DQN(self.n_observations, self.n_actions)
+        self.w = self.env.game.w
+        self.h = self.env.game.h
+        self.n_actions = self.w * self.h  # each cell
+        self.n_observations = self.w * self.h  # flattened board state
+        # Policy and target are CNNs taking (batch, 1, H, W)
+        self.policy_net = DQN(1, self.h, self.w, self.n_actions)
+        self.target_net = DQN(1, self.h, self.w, self.n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR, amsgrad=True)
@@ -74,9 +86,14 @@ class RL_agent:
         eps_threshold = EPS_END + (EPS_START - EPS_END) * \
         math.exp(-1. * self.steps_done / EPS_DECAY)
 
-        # obtain actionable mask (expected flat list length == n_actions)
+        # obtain actionable mask (Game.get_actionable_mask may return one entry per cell)
         actionmask = self.env.game.get_actionable_mask()
         tensor_actionmask = torch.tensor(actionmask, dtype=torch.bool, device=self.device)
+
+        # If mask was accidentally returned as per-action (2 entries per cell),
+        # convert it to one-per-cell by OR-ing left/right entries.
+        if tensor_actionmask.numel() == (self.n_actions * 2):
+            tensor_actionmask = tensor_actionmask.view(-1, 2).any(1)
 
         # run network to get Q-values
         with torch.no_grad():
@@ -107,8 +124,9 @@ class RL_agent:
     def select_action_tuple(self, state, epsilon = 0.1):
         '''Select action as (x, y, mode) tuple'''
         action_index = self.select_action(state).item()
-        cell_index = action_index // 2
-        mode = 'left' if action_index % 2 == 0 else 'right'
+        # network outputs one Q per cell; default to left click
+        cell_index = action_index
+        mode = 'left'
 
         x = (cell_index % self.env.game.w) + 1        # 1-based coordinates
         y = (cell_index // self.env.game.w) + 1       # 1-based coordinates
@@ -132,7 +150,8 @@ class RL_agent:
         if len(non_final_next_states_list) > 0:
             non_final_next_states = torch.cat(non_final_next_states_list)
         else:
-            non_final_next_states = torch.empty((0, self.n_observations), device=self.device)
+            # empty tensor with shape (0, channels, H, W)
+            non_final_next_states = torch.empty((0, 1, self.h, self.w), device=self.device)
 
         # move batches to our device
         state_batch = torch.cat([s.to(self.device) for s in batch.state])
@@ -186,19 +205,18 @@ class DQNAgent(RL_agent):
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
             flat = [int(item) for row in s for item in row]
-            t = torch.tensor([flat], dtype=torch.float32, device=self.device)
+            t = torch.tensor([flat], dtype=torch.float32, device=self.device).view(1, 1, h, w)
             return t
 
         # initial tensor
         state_t = state_to_tensor(state)
 
         while steps < max_steps and not done:
-            
             action_idx = int(self.select_action(state_t).item())
-            
-            # decode action index to (x,y,mode)
-            cell_index = action_idx // 2
-            mode = 'left' if (action_idx % 2) == 0 else 'right'
+
+            # network outputs one value per cell; action_idx is the cell index
+            cell_index = action_idx
+            mode = 'left'
             x = (cell_index % w) + 1
             y = (cell_index // w) + 1
 
@@ -294,7 +312,7 @@ class Hybrid_Agent(RL_agent):
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
             flat = [int(item) for row in s for item in row]
-            t = torch.tensor([flat], dtype=torch.float32, device=self.device)
+            t = torch.tensor([flat], dtype=torch.float32, device=self.device).view(1, 1, h, w)
             return t
 
         # initial random left-click to start the board (do not record in memory)
@@ -381,9 +399,9 @@ class Hybrid_Agent(RL_agent):
                 # prepare tensors
                 state_t = state_to_tensor(state)
                 action_idx = int(self.select_action(state_t).item())
-                # decode to (x,y,mode)
-                cell_index = action_idx // 2
-                mode = 'left' if (action_idx % 2) == 0 else 'right'
+                # decode to (x,y,mode) — network outputs per-cell Qs
+                cell_index = action_idx
+                mode = 'left'
                 x = (cell_index % w) + 1
                 y = (cell_index // w) + 1
 

@@ -176,6 +176,9 @@ class Game:
         h = len(state)
         w = len(state[0]) if h > 0 else 0
 
+        # Return one mask entry per cell (length == w * h):
+        #  - 1 means the cell is unrevealed and therefore actionable
+        #  - 0 means the cell is revealed or flagged and not actionable
         actionmask = []
         for rr in range(h):
             for cc in range(w):
@@ -183,17 +186,14 @@ class Game:
                     val = state[rr][cc]
                 except Exception:
                     # treat missing value as non-actionable
-                    actionmask.extend([0, 0])
+                    actionmask.append(0)
                     continue
                 if isinstance(val, int) and val == -1:
-                    # unrevealed: both left and right are valid
-                    actionmask.extend([1, 1])
-                elif isinstance(val, int) and val in (-2, -11):
-                    # flagged: only right-click (toggle) is valid
-                    actionmask.extend([0, 1])
+                    # unrevealed: actionable
+                    actionmask.append(1)
                 else:
-                    # revealed (0-8) or revealed bomb/death (-9,-10): not actionable
-                    actionmask.extend([0, 0])
+                    # flagged (-2,-11) or revealed (0-8 or bombs): not actionable
+                    actionmask.append(0)
 
         return actionmask
                     

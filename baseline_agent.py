@@ -153,7 +153,7 @@ class BaselineAgent:
             # the local `state` and record the transition in `history`.
             for (x, y, mode) in dedup_actions:
                 try:
-                    state, reward, done, _ = self.env.step((x, y, mode))
+                    state, reward, done, info = self.env.step((x, y, mode))
                 except Exception as e:
                     # surface execution errors in the returned result
                     return {"error": str(e)}
@@ -170,7 +170,7 @@ class BaselineAgent:
                     break
 
         # Return a summary including the final board state for rendering
-        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click}
+        return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False)}
 
 
 if __name__ == "__main__":
