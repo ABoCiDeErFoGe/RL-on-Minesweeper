@@ -11,7 +11,7 @@ from Game import MSEnv
 from config import *
 
 Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
+            ('state','action','next_state','reward','mask'))
 
 
 class ReplayMemory(object):
@@ -65,9 +65,13 @@ class RL_agent:
         self.h = self.env.game.h
         self.n_actions = self.w * self.h  # each cell
         self.n_observations = self.w * self.h  # flattened board state
-        # Policy and target are CNNs taking (batch, 1, H, W)
-        self.policy_net = DQN(1, self.h, self.w, self.n_actions)
-        self.target_net = DQN(1, self.h, self.w, self.n_actions)
+        # padding around board (border); agent must not be able to click border
+        self.pad = 1
+        self.padded_h = self.h + 2 * self.pad
+        self.padded_w = self.w + 2 * self.pad
+        # Policy and target are CNNs taking (batch, 3, H_padded, W_padded)
+        self.policy_net = DQN(3, self.padded_h, self.padded_w, self.n_actions)
+        self.target_net = DQN(3, self.padded_h, self.padded_w, self.n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR, amsgrad=True)
@@ -131,53 +135,111 @@ class RL_agent:
         x = (cell_index % self.env.game.w) + 1        # 1-based coordinates
         y = (cell_index // self.env.game.w) + 1       # 1-based coordinates
         return (x, y, mode)
+
+    def preprocess_state(self, state, pad: int = None):
+        """Preprocess a 2D game state into 3 channels with padding.
+
+        Returns a Python list of shape (3, padded_h, padded_w).
+
+        Channels:
+          - ch0: revealed numbers only (normalized to [0,1] by dividing by 8). Hidden/flagged -> 0
+          - ch1: revealed mask (1 for any revealed cell, including zeros)
+          - ch2: flagged mask (1 for flagged cells)
+
+        Padding around the board is filled with zeros; those border positions
+        are therefore non-actionable by mask logic.
+        """
+        import numpy as _np
+        pad = self.pad if pad is None else pad
+        h = self.h
+        w = self.w
+        ph = h + 2 * pad
+        pw = w + 2 * pad
+
+        ch0 = _np.zeros((ph, pw), dtype=_np.float32)
+        ch1 = _np.zeros((ph, pw), dtype=_np.float32)
+        ch2 = _np.zeros((ph, pw), dtype=_np.float32)
+
+        for r in range(h):
+            for c in range(w):
+                try:
+                    val = state[r][c]
+                except Exception:
+                    val = -1
+                rr = r + pad
+                cc = c + pad
+                # revealed numbers: 0-8
+                if isinstance(val, int) and val >= 0:
+                    ch1[rr, cc] = 1.0
+                    # normalize number to [0,1]
+                    ch0[rr, cc] = float(val) / 8.0
+                # flagged
+                elif isinstance(val, int) and val in (-2, -11):
+                    ch2[rr, cc] = 1.0
+
+        stacked = _np.stack([ch0, ch1, ch2], axis=0)
+        return stacked.tolist()
     
     def optimize_model(self):
         if len(self.memory) < BATCH_SIZE:
             return
 
         transitions = self.memory.sample(BATCH_SIZE)
-        # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
-        # detailed explanation). This converts batch-array of Transitions
-        # to Transition of batch-arrays.
         batch = Transition(*zip(*transitions))
 
-        # mask of non-final next states
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.next_state)), device=self.device, dtype=torch.bool)
+        state_batch  = torch.cat(batch.state).to(self.device)
+        action_batch = torch.cat(batch.action).to(self.device)
+        reward_batch = torch.cat(batch.reward).to(self.device)
 
-        # concatenate next states that are not None (handle empty list)
-        non_final_next_states_list = [s.to(self.device) for s in batch.next_state if s is not None]
-        if len(non_final_next_states_list) > 0:
-            non_final_next_states = torch.cat(non_final_next_states_list)
-        else:
-            # empty tensor with shape (0, channels, H, W)
-            non_final_next_states = torch.empty((0, 1, self.h, self.w), device=self.device)
+        non_final_mask = torch.tensor(
+            tuple(s is not None for s in batch.next_state),
+            device=self.device,
+            dtype=torch.bool
+        )
 
-        # move batches to our device
-        state_batch = torch.cat([s.to(self.device) for s in batch.state])
-        action_batch = torch.cat([a.to(self.device) for a in batch.action])
-        reward_batch = torch.cat([r.to(self.device) for r in batch.reward]).to(self.device)
+        non_final_next_states = torch.cat(
+            [s for s in batch.next_state if s is not None]
+        ).to(self.device)
 
-        # Compute Q(s_t, a)
-        state_action_values = self.policy_net(state_batch).gather(1, action_batch)
-        # Compute V(s_{t+1}) for all next states using the target network
+        # gather masks aligned with non-final states
+        next_masks = torch.stack([
+            m for s, m in zip(batch.next_state, batch.mask) if s is not None
+        ]).to(self.device)
+
+        # Q(s,a)
+        q_sa = self.policy_net(state_batch).gather(1, action_batch)
+
         next_state_values = torch.zeros(BATCH_SIZE, device=self.device)
+
         with torch.no_grad():
             if non_final_next_states.size(0) > 0:
-                next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1).values
 
-        # Compute the expected Q values
-        expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+                # Double DQN
+                next_policy_q = self.policy_net(non_final_next_states)
 
-        # Compute Huber loss
-        criterion = nn.SmoothL1Loss()
-        loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+                # mask invalid
+                next_policy_q[~next_masks] = -1e9
 
-        # Optimize the model
+                next_actions = next_policy_q.argmax(1)
+
+                next_target_q = self.target_net(non_final_next_states)
+
+                next_target_q[~next_masks] = -1e9
+
+                next_vals = next_target_q.gather(
+                    1,
+                    next_actions.unsqueeze(1)
+                ).squeeze()
+
+                next_state_values[non_final_mask] = next_vals
+
+        expected = reward_batch + GAMMA * next_state_values
+
+        loss = F.smooth_l1_loss(q_sa, expected.unsqueeze(1))
+
         self.optimizer.zero_grad()
         loss.backward()
-        # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10)
         self.optimizer.step()
 
 class DQNAgent(RL_agent):
@@ -192,8 +254,12 @@ class DQNAgent(RL_agent):
         """
         # Start a new game and obtain initial board state (2D list)
         # Assume the difficulty is unchanged for now
+        
+        w = self.env.game.w
         state = self.env.reset(difficulty=difficulty)
-        self.initialize_network()  # reinitialize network for new difficulty
+        
+        if (w != self.env.game.w):
+            self.initialize_network()  # reinitialize network for new difficulty
         w = self.env.game.w
         h = self.env.game.h
 
@@ -204,8 +270,8 @@ class DQNAgent(RL_agent):
 
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
-            flat = [int(item) for row in s for item in row]
-            t = torch.tensor([flat], dtype=torch.float32, device=self.device).view(1, 1, h, w)
+            chs = self.preprocess_state(s)
+            t = torch.tensor([chs], dtype=torch.float32, device=self.device)
             return t
 
         # initial tensor
@@ -232,9 +298,17 @@ class DQNAgent(RL_agent):
             reward_tensor = torch.tensor([float(reward)], dtype=torch.float32, device=self.device)
             next_state_tensor = None if done else state_to_tensor(next_state)
 
-            # push transition
-            self.memory.push(state_t, action_tensor, next_state_tensor, reward_tensor)
+            next_mask = self.env.game.get_actionable_mask()
+            next_mask = torch.tensor(next_mask, dtype=torch.bool)
 
+            self.memory.push(
+                state_t,
+                action_tensor,
+                next_state_tensor,
+                reward_tensor,
+                next_mask
+            )
+            
             # record history
             history.append(((x, y, mode), reward, done))
             total_reward += reward
@@ -300,7 +374,11 @@ class Hybrid_Agent(RL_agent):
         
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
                 
-        state = self.env.reset(difficulty)
+        w = self.env.game.w
+        state = self.env.reset(difficulty=difficulty)
+        
+        if (w != self.env.game.w):
+            self.initialize_network()  # reinitialize network for new difficulty
         w = self.env.game.w
         h = self.env.game.h
 
@@ -311,8 +389,8 @@ class Hybrid_Agent(RL_agent):
         random_click = 0
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
-            flat = [int(item) for row in s for item in row]
-            t = torch.tensor([flat], dtype=torch.float32, device=self.device).view(1, 1, h, w)
+            chs = self.preprocess_state(s)
+            t = torch.tensor([chs], dtype=torch.float32, device=self.device)
             return t
 
         # initial random left-click to start the board (do not record in memory)
@@ -416,9 +494,16 @@ class Hybrid_Agent(RL_agent):
                 reward_tensor = torch.tensor([float(reward)], dtype=torch.float32, device=self.device)
                 next_state_tensor = None if done else state_to_tensor(next_state)
 
-                # push transition to memory
-                self.memory.push(state_t, action_tensor, next_state_tensor, reward_tensor)
+                next_mask = self.env.game.get_actionable_mask()
+                next_mask = torch.tensor(next_mask, dtype=torch.bool)
 
+                self.memory.push(
+                    state_t,
+                    action_tensor,
+                    next_state_tensor,
+                    reward_tensor,
+                    next_mask
+                )
                 # record history and stats
                 history.append(((x, y, mode), reward, done))
                 # DQN-decided action; count as a random/dqn click
