@@ -39,7 +39,7 @@ class agent_interface(ABC):
             info = {
                 'episode': i,
                 'length': len(res.get('history', [])) if isinstance(res, dict) else None,
-                'win': bool(win_flag),
+                'win': 1 if win_flag else 0,
                 'reward': res.get('reward', 0) if isinstance(res, dict) else None,
                 'random_clicks': random_clicks,
                 'done': done_flag,
