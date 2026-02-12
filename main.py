@@ -20,6 +20,7 @@ from playwright.sync_api import sync_playwright
 from Game import Game
 import importlib
 from Game import MSEnv
+from utils import extract_random_clicks
 from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, NUMBER_COLOR_MAP
 
 class App:
@@ -461,57 +462,56 @@ class App:
         if episodes <= 1:
             return agent.run_episode(**run_kwargs)
 
-        # run multiple episodes sequentially and collect results
-        results = []
-        final_state = None
         # open the generalized visualization window once before running multiple episodes
         try:
             self.root.after(0, lambda: self.open_agent_visualization_window())
         except Exception:
             pass
-        for i in range(episodes):
-            res = agent.run_episode(**run_kwargs)
-            results.append(res)
-            # track final_state from last episode if present
-            final_state = res.get('final_state') if isinstance(res, dict) else None
 
-            # Notify GUI about this episode via a short-lived thread which schedules
-            # a GUI-thread callback. This keeps worker-side timing predictable
-            # while allowing the GUI to update responsively per-episode.
+        # progress callback that agents will call per-episode; it updates both
+        # the short episode summary panel and the visualization plots.
+        def _progress_cb(info):
             try:
-                idx = i + 1
-                def _notify_thread(index, result_obj, total, name=agent_name):
-                    import threading
-                    def _do_notify():
-                        try:
-                            self.root.after(0, lambda: self._handle_episode_progress(name, index, result_obj, total))
-                        except Exception:
-                            pass
-                    t = threading.Thread(target=_do_notify, daemon=True)
-                    t.start()
-                _notify_thread(idx, res, episodes)
-            except Exception:
-                pass
+                # construct a minimal result dict for _handle_episode_progress
+                res = {
+                    'steps': info.get('length'),
+                    'reward': info.get('reward'),
+                    'done': info.get('done', False),
+                    'history': [],
+                    'random_clicks': extract_random_clicks(info),
+                    'win': info.get('win', False),
+                }
 
-            # also send a visualization update for this episode (non-blocking)
-            try:
-                info = None
-                if isinstance(res, dict):
-                    # prefer explicit steps, else compute from history
-                    steps = res.get('steps') if isinstance(res.get('steps', None), int) else (len(res.get('history', [])) if isinstance(res.get('history', None), list) else None)
-                    info = {'episode': idx, 'length': steps, 'reward': res.get('reward'), 'done': res.get('done', False), "random_clicks": res.get('random_clicks', res.get('random_click', 0))}
-                    # include explicit win flag if present
-                    if 'win' in res:
-                        info['win'] = bool(res.get('win'))
-                else:
-                    info = {'episode': idx}
+                # schedule short summary update on GUI thread via a small worker thread
                 try:
-                    # schedule the visualization update from worker thread
+                    idx = info.get('episode')
+                    def _notify_thread(index, result_obj, total, name=agent_name):
+                        import threading
+                        def _do_notify():
+                            try:
+                                self.root.after(0, lambda: self._handle_episode_progress(name, index, result_obj, total))
+                            except Exception:
+                                pass
+                        t = threading.Thread(target=_do_notify, daemon=True)
+                        t.start()
+                    _notify_thread(idx, res, episodes)
+                except Exception:
+                    pass
+
+                # always update visualization plots (safe to call from worker thread)
+                try:
                     self.update_agent_visualization(info)
                 except Exception:
                     pass
             except Exception:
                 pass
+
+        # let the agent run multiple episodes and provide per-episode progress
+        results = agent.run_num_episodes(int(episodes), progress_update=_progress_cb, **run_kwargs)
+
+        final_state = None
+        if isinstance(results, list) and results:
+            final_state = results[-1].get('final_state') if isinstance(results[-1], dict) else None
 
         return {'episodes': episodes, 'results': results, 'final_state': final_state}
 
@@ -551,7 +551,7 @@ class App:
                         rec['steps'] = int(result.get('steps', 0))
                         rec['reward'] = float(result.get('reward', 0))
                         rec['done'] = bool(result.get('done', False))
-                        rec['random_clicks'] = int(result.get('random_clicks', 0)) if 'random_clicks' in result else 0
+                        rec['random_clicks'] = extract_random_clicks(result)
                     else:
                         rec['steps'] = 0
                         rec['reward'] = 0.0
@@ -566,7 +566,7 @@ class App:
                 if isinstance(result, dict):
                     steps = result.get('steps', 0)
                     done = result.get('done', False)
-                    rc = result.get('random_clicks', result.get('random_click', 0)) if isinstance(result.get('random_clicks', None), int) or result.get('random_clicks', None) is not None else 0
+                    rc = extract_random_clicks(result)
                     outcome = 'Win' if done and result.get('reward', 0) > 0 else ('Lose' if done else 'Incomplete')
                     text = f"Episode {episode_index}/{total_episodes}: {outcome}, steps={steps}, random_clicks={rc}"
                 else:
@@ -601,7 +601,7 @@ class App:
                 if r.get('done', False) and r.get('reward', 0) > 0:
                     wins += 1
                 total_steps += int(r.get('steps', 0))
-                total_random += int(r.get('random_clicks', r.get('random_click', 0))) if ('random_clicks' in r or 'random_click' in r) else 0
+                total_random += extract_random_clicks(r)
 
             win_rate = wins / n * 100.0
             avg_steps = total_steps / n if n else 0
@@ -943,7 +943,7 @@ class App:
             length = info.get('length', info.get('steps'))
             reward = info.get('reward')
             # random clicks: support multiple key names
-            random_clicks = info.get("random_clicks", info.get("random_click", None))
+            random_clicks = extract_random_clicks(info)
 
             # determine win: prefer explicit 'win', else use done+reward
             win_flag = 1 if info.get('win') else 0
@@ -956,7 +956,7 @@ class App:
             v['lengths'].append(length if length is not None else 0)
             v['wins'].append(win_flag if win_flag is not None else 0)
             v['rewards'].append(reward if reward is not None else (info.get('reward', 0) if info.get('reward', None) is not None else 0))
-            v['randoms'].append(int(random_clicks) if random_clicks is not None else 0)
+            v['randoms'].append(int(random_clicks))
 
             # update plots
             try:
