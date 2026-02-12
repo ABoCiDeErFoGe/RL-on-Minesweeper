@@ -18,7 +18,9 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from playwright.sync_api import sync_playwright
 from Game import Game
-from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, CHECK_CHAR, NUMBER_COLOR_MAP
+import importlib
+from Game import MSEnv
+from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, NUMBER_COLOR_MAP
 
 class App:
     def __init__(self):
@@ -372,8 +374,7 @@ class App:
         This runs on the Playwright worker thread and uses `run_num_episodes`'s
         `progress_update` callback to stream per-episode info back to the GUI.
         """
-        import importlib
-        from Game import MSEnv
+        # use top-level importlib and Game.MSEnv
 
         mod = importlib.import_module('RL_agent')
         AgentClass = getattr(mod, 'DQNAgent')
@@ -403,8 +404,6 @@ class App:
 
         Instantiates `BaselineAgent` and passes it to `Hybrid_Agent`.
         """
-        import importlib
-        from Game import MSEnv
 
         mod = importlib.import_module('RL_agent')
         AgentClass = getattr(mod, 'Hybrid_Agent')
@@ -444,9 +443,6 @@ class App:
         """
         if not hasattr(self, 'game') or self.game is None:
             raise RuntimeError("Game not initialized")
-
-        import importlib
-        from Game import MSEnv
 
         mod = importlib.import_module(module_name)
         AgentClass = getattr(mod, class_name)
