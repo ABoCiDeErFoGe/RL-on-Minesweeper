@@ -23,9 +23,10 @@ import time
 from typing import Dict, Any
 
 from Game import MSEnv
+from agent_interface import agent_interface
 
 
-class RandomAgent:
+class RandomAgent(agent_interface):
     def __init__(self, env: MSEnv, right_click_prob: float = 0.05) -> None:
         self.env = env
         self.right_click_prob = float(right_click_prob)

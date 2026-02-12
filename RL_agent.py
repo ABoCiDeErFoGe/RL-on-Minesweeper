@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from Game import MSEnv
+from agent_interface import agent_interface
 
 from config import *
 
@@ -54,7 +55,7 @@ class DQN(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-class RL_agent:
+class RL_agent(agent_interface):
     def __init__(self, env: MSEnv) -> None:
         self.env = env
         self.initialize_network()
@@ -334,38 +335,7 @@ class DQNAgent(RL_agent):
 
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None", 'win': info.get('win', False)}
 
-    def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
-        """Run `num_episodes` episodes sequentially and call `progress_update(info)` after each.
-
-        `progress_update` is an optional callable that receives a dict with keys:
-        - `episode`: 1-based episode index
-        - `length`: episode length (steps)
-        - `win`: boolean indicating whether episode was won
-        - `reward`: numeric reward from the episode
-
-        Returns a list of the episode result dicts.
-        """
-        results = []
-        for i in range(1, int(num_episodes) + 1):
-            res = self.run_episode(difficulty=difficulty, max_steps=max_steps, delay=delay)
-            results.append(res)
-
-            # determine win flag
-            win_flag = False
-            try:
-                if res.get('win', False) and res.get('reward', 0) > 0:
-                    win_flag = True
-            except Exception:
-                win_flag = False
-
-            info = {'episode': i, 'length': len(res.get('history', [])), 'win': bool(win_flag), 'reward': res.get('reward', 0)}
-            try:
-                if callable(progress_update):
-                    progress_update(info)
-            except Exception:
-                pass
-
-        return results
+    # run_num_episodes inherited from agent_interface
 
 class Hybrid_Agent(RL_agent):
     def __init__(self, env: MSEnv, baseline_agent) -> None:
@@ -532,32 +502,6 @@ class Hybrid_Agent(RL_agent):
 
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False)}
     
-    def run_num_episodes(self, num_episodes: int, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, progress_update=None):
-        """Run `num_episodes` episodes using the hybrid policy and call
-        `progress_update(info)` after each episode (same contract as DQNAgent).
-
-        Returns a list of per-episode result dicts.
-        """
-        results = []
-        for i in range(1, int(num_episodes) + 1):
-            res = self.run_episode(difficulty=difficulty, max_steps=max_steps, delay=delay)
-            results.append(res)
-
-            # determine win flag
-            win_flag = False
-            try:
-                if res.get('win', False):
-                    win_flag = True
-            except Exception:
-                win_flag = False
-
-            info = {'episode': i, 'length': len(res.get('history', [])), 'win': bool(win_flag), 'reward': res.get('reward', 0), 'random_clicks': res.get('random_clicks', res.get('random_click', 0))}
-            try:
-                if callable(progress_update):
-                    progress_update(info)
-            except Exception:
-                pass
-
-        return results
+    # run_num_episodes inherited from agent_interface
         
         

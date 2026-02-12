@@ -29,6 +29,7 @@ import time
 from typing import Dict, Any, List, Tuple
 
 from Game import MSEnv
+from agent_interface import agent_interface
 
 
 def _neighbors(r: int, c: int, w: int, h: int) -> List[Tuple[int, int]]:
@@ -46,7 +47,7 @@ def _neighbors(r: int, c: int, w: int, h: int) -> List[Tuple[int, int]]:
     return coords
 
 
-class BaselineAgent:
+class BaselineAgent(agent_interface):
     def __init__(self, env: MSEnv) -> None:
         self.env = env
 
