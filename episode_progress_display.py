@@ -9,8 +9,13 @@ class EpisodeProgressDisplay:
     Uses a `Toplevel` when provided a `master` to avoid creating multiple
     root `Tk()` windows. If `master` is None it falls back to creating its
     own `Tk()` so the class remains usable standalone.
+
+    New optional init args:
+    - `agent_name`: display the agent's name (static for the run)
+    - `difficulty`: display difficulty string (static for the run)
+    - `total_episodes`: integer total episodes for the run (used to show finished/total)
     """
-    def __init__(self, title="Episode Progress", master=None):
+    def __init__(self, title="Episode Progress", master=None, agent_name: str = None, difficulty: str = None, total_episodes: int = None):
         # internal records
         self.win_record = []
         self.random_click_record = []
@@ -53,7 +58,24 @@ class EpisodeProgressDisplay:
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        # side panel labels
+        # side panel info: top shows run metadata (Agent / Difficulty / Episodes)
+        info_frame = tk.Frame(side_frame)
+        info_frame.pack(fill='x', padx=6, pady=(6,4))
+
+        tk.Label(info_frame, text='Agent:').grid(row=0, column=0, sticky='w')
+        self.agent_label = tk.Label(info_frame, text=agent_name if agent_name is not None else 'N/A')
+        self.agent_label.grid(row=0, column=1, sticky='w')
+
+        tk.Label(info_frame, text='Difficulty:').grid(row=1, column=0, sticky='w')
+        self.difficulty_label = tk.Label(info_frame, text=difficulty if difficulty is not None else 'N/A')
+        self.difficulty_label.grid(row=1, column=1, sticky='w')
+
+        tk.Label(info_frame, text='Episodes:').grid(row=2, column=0, sticky='w')
+        total_text = f"0/{total_episodes}" if total_episodes is not None else "0/0"
+        self.episodes_label = tk.Label(info_frame, text=total_text)
+        self.episodes_label.grid(row=2, column=1, sticky='w')
+
+        # summary labels
         tk.Label(side_frame, text='Summary', font=(None, 12, 'bold')).pack(pady=(6,4))
         self.win_rate_label = tk.Label(side_frame, text='Win rate: 0.0%')
         self.win_rate_label.pack(anchor='w', padx=8, pady=2)
@@ -66,6 +88,9 @@ class EpisodeProgressDisplay:
 
         # keep internal episode counter for x-axis if incoming info lacks 'episode'
         self._next_ep_index = 1
+        # run counters
+        self._finished_episodes = 0
+        self._total_episodes = int(total_episodes) if total_episodes is not None else None
 
     def _apply_update(self, info: dict):
         """Apply update on the GUI thread (internal)."""
@@ -89,6 +114,22 @@ class EpisodeProgressDisplay:
         if ep is None:
             ep = self._next_ep_index
         self._next_ep_index = max(self._next_ep_index, ep + 1)
+
+        # update run progress if an episode index is provided
+        try:
+            if isinstance(ep, int):
+                # finished episodes count becomes the reported episode index
+                self._finished_episodes = ep
+                if self._total_episodes is None:
+                    # if total unknown, infer from counting
+                    self._total_episodes = self._total_episodes or None
+                # refresh episodes label
+                try:
+                    self.episodes_label.config(text=f"{self._finished_episodes}/{self._total_episodes if self._total_episodes is not None else len(self.episode_length_record)}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # append records
         self.episode_length_record.append(length if length is not None else 0)
@@ -151,6 +192,46 @@ class EpisodeProgressDisplay:
             # fallback: call directly
             try:
                 self._apply_update(info)
+            except Exception:
+                pass
+
+    def set_agent(self, name: str):
+        """Thread-safe setter for the Agent label (static for the run)."""
+        try:
+            self.window.after(0, lambda: self.agent_label.config(text=name))
+        except Exception:
+            try:
+                self.agent_label.config(text=name)
+            except Exception:
+                pass
+
+    def set_difficulty(self, diff: str):
+        """Thread-safe setter for the Difficulty label (static for the run)."""
+        try:
+            self.window.after(0, lambda: self.difficulty_label.config(text=diff))
+        except Exception:
+            try:
+                self.difficulty_label.config(text=diff)
+            except Exception:
+                pass
+
+    def set_run_progress(self, finished: int, total: int):
+        """Thread-safe setter for finished/total episodes display."""
+        try:
+            self._finished_episodes = int(finished)
+        except Exception:
+            self._finished_episodes = finished
+        try:
+            self._total_episodes = int(total) if total is not None else None
+        except Exception:
+            pass
+        # schedule UI update
+        try:
+            text = f"{self._finished_episodes}/{self._total_episodes if self._total_episodes is not None else 0}"
+            self.window.after(0, lambda: self.episodes_label.config(text=text))
+        except Exception:
+            try:
+                self.episodes_label.config(text=text)
             except Exception:
                 pass
 

@@ -1023,7 +1023,7 @@ class App:
         holder = {'disp': None}
         def _create_on_main():
             try:
-                holder['disp'] = EpisodeProgressDisplay(title=f"{agent_name} Progress", master=self.root)
+                holder['disp'] = EpisodeProgressDisplay(title=f"{agent_name} Progress", master=self.root, agent_name=agent_name, difficulty=difficulty, total_episodes=episodes)
             except Exception:
                 holder['disp'] = None
 
