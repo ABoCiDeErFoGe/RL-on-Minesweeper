@@ -67,7 +67,26 @@ class EpisodeProgressDisplay:
         self.agent_label.grid(row=0, column=1, sticky='w')
 
         tk.Label(info_frame, text='Difficulty:').grid(row=1, column=0, sticky='w')
-        self.difficulty_label = tk.Label(info_frame, text=difficulty if difficulty is not None else 'N/A')
+        # append board size and mine count for known difficulties using a switch-like match
+        try:
+            if difficulty is None:
+                diff_text = 'N/A'
+            else:
+                dlow = str(difficulty).lower()
+                print(dlow)
+                if dlow == 'beginner':
+                    diff_text = f"{difficulty} (9x9, 10 mines)"
+                elif dlow == 'intermediate':
+                    diff_text = f"{difficulty} (16x16, 40 mines)"
+                elif dlow == 'expert':
+                    diff_text = f"{difficulty} (16x30, 99 mines)"
+                else:
+                    diff_text = str(difficulty)
+        except Exception:
+            print("oops")
+            diff_text = difficulty if difficulty is not None else 'N/A'
+
+        self.difficulty_label = tk.Label(info_frame, text=diff_text)
         self.difficulty_label.grid(row=1, column=1, sticky='w')
 
         tk.Label(info_frame, text='Episodes:').grid(row=2, column=0, sticky='w')
@@ -207,13 +226,31 @@ class EpisodeProgressDisplay:
 
     def set_difficulty(self, diff: str):
         """Thread-safe setter for the Difficulty label (static for the run)."""
-        try:
-            self.window.after(0, lambda: self.difficulty_label.config(text=diff))
-        except Exception:
+        def _do_set(d):
             try:
-                self.difficulty_label.config(text=diff)
+                if d is None:
+                    text = 'N/A'
+                else:
+                    dlow = str(d).strip().lower()
+                    if dlow == 'beginner':
+                        text = f"{d} (9x9, 10 mines)"
+                    elif dlow == 'intermediate':
+                        text = f"{d} (16x16, 40 mines)"
+                    elif dlow == 'expert':
+                        text = f"{d} (16x30, 99 mines)"
+                    else:
+                        text = str(d)
+                self.difficulty_label.config(text=text)
             except Exception:
-                pass
+                try:
+                    self.difficulty_label.config(text=d if d is not None else 'N/A')
+                except Exception:
+                    pass
+
+        try:
+            self.window.after(0, lambda: _do_set(diff))
+        except Exception:
+            _do_set(diff)
 
     def set_run_progress(self, finished: int, total: int):
         """Thread-safe setter for finished/total episodes display."""

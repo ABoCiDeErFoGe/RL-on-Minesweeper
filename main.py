@@ -948,7 +948,36 @@ class App:
         self.sidebar = tk.Frame(self.root)
         self.sidebar.pack(side="right", fill="y", padx=8, pady=8)
 
-        # Difficulty selector
+        # Agent selection buttons (2x2 grid) and Start control
+        self._agent_buttons = {}
+        self.selected_agent = None
+
+        agent_frame = tk.Frame(self.sidebar)
+        agent_frame.pack(fill='x', pady=(4,6))
+
+        # first row
+        btn = tk.Button(agent_frame, text="Random", width=12)
+        btn.config(command=lambda k='random', b=btn: self._select_agent(k, b))
+        btn.grid(row=0, column=0, padx=4, pady=2)
+        self._agent_buttons['random'] = btn
+
+        btn = tk.Button(agent_frame, text="Pure rule", width=12)
+        btn.config(command=lambda k='baseline', b=btn: self._select_agent(k, b))
+        btn.grid(row=0, column=1, padx=4, pady=2)
+        self._agent_buttons['baseline'] = btn
+
+        # second row
+        btn = tk.Button(agent_frame, text="Pure CNN", width=12)
+        btn.config(command=lambda k='rl', b=btn: self._select_agent(k, b))
+        btn.grid(row=1, column=0, padx=4, pady=2)
+        self._agent_buttons['rl'] = btn
+
+        btn = tk.Button(agent_frame, text="Hybrid", width=12)
+        btn.config(command=lambda k='hybrid', b=btn: self._select_agent(k, b))
+        btn.grid(row=1, column=1, padx=4, pady=2)
+        self._agent_buttons['hybrid'] = btn
+
+        # Difficulty selector (placed below agent selection)
         diff_frame = tk.Frame(self.sidebar)
         diff_frame.pack(fill="x", pady=(0,6))
         tk.Label(diff_frame, text="Difficulty:").pack(side="left")
@@ -959,29 +988,46 @@ class App:
         diff_menu = tk.OptionMenu(diff_frame, self._diff_var, *options, command=self._on_difficulty_selected)
         diff_menu.pack(side="right")
 
-        # Episodes selector (predefined + custom entry)
-        episodes_frame = tk.Frame(self.sidebar)
-        episodes_frame.pack(fill="x", pady=(6,6))
-        tk.Label(episodes_frame, text="Episodes:").pack(side="left")
-        # predefined options
-        self._episodes_var = tk.StringVar(value="1")
-        episode_options = ["1", "5", "10", "50"]
-        episodes_menu = tk.OptionMenu(episodes_frame, self._episodes_var, *episode_options)
-        episodes_menu.pack(side="right")
-        # custom entry below
-        custom_frame = tk.Frame(self.sidebar)
-        custom_frame.pack(fill="x")
-        tk.Label(custom_frame, text="Custom:").pack(side="left")
-        self._episodes_entry = tk.Entry(custom_frame, width=6)
-        self._episodes_entry.pack(side="right")
+        # Start button (below difficulty)
+        start_btn = tk.Button(self.sidebar, text="Start", command=self.start_selected_agent)
+        start_btn.pack(fill="x", pady=(6,6))
 
-        tk.Button(self.sidebar, text="Start").pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Random Agent", command=lambda: self.start_random_agent()).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Baseline Agent", command=lambda: self.start_baseline_agent()).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Train RL Agent", command=lambda: self.start_rl_agent()).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Hybrid Agent", command=lambda: self.start_hybrid_agent()).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Reset", command=lambda: self.build_grid(self.grid_container)).pack(fill="x", pady=2)
-        tk.Button(self.sidebar, text="Quit", command=self.on_close).pack(fill="x", pady=2)
+        # default selection -> Random
+        try:
+            self._select_agent('random', self._agent_buttons['random'])
+        except Exception:
+            self.selected_agent = 'random'
+
+        # Episodes heading
+        tk.Label(self.sidebar, text="Episodes:", font=(None, 10, 'bold')).pack(anchor='w', pady=(6,2), padx=2)
+
+        # Training episodes selector (dropdown + custom entry) - legacy logic uses this
+        self._train_episodes_var = tk.StringVar(value="1")
+        episode_options = ["1", "5", "10", "50"]
+        train_frame = tk.Frame(self.sidebar)
+        train_frame.pack(fill="x", pady=(2,4))
+        tk.Label(train_frame, text="Training:").pack(side="left")
+        train_select = tk.Frame(train_frame)
+        train_select.pack(side="right")
+        train_menu = tk.OptionMenu(train_select, self._train_episodes_var, *episode_options)
+        train_menu.pack(side='left')
+        self._train_episodes_entry = tk.Entry(train_select, width=6)
+        self._train_episodes_entry.pack(side='left', padx=(6,0))
+
+        # Testing episodes selector (dropdown + entry), default 0
+        test_frame = tk.Frame(self.sidebar)
+        test_frame.pack(fill="x", pady=(4,6))
+        tk.Label(test_frame, text="Testing:").pack(side="left")
+        # include 0 as an option for testing
+        self._test_episodes_var = tk.StringVar(value="0")
+        test_select = tk.Frame(test_frame)
+        test_select.pack(side='right')
+        test_options = ["0", "1", "5", "10", "50"]
+        test_menu = tk.OptionMenu(test_select, self._test_episodes_var, *test_options)
+        test_menu.pack(side='left')
+        self._test_episodes_entry = tk.Entry(test_select, width=6)
+        self._test_episodes_entry.insert(0, "0")
+        self._test_episodes_entry.pack(side='left', padx=(6,0))
         
         # Label indicating the progress, placed below the grid in the left column
         # Episode info frame: shows per-episode and aggregated statistics
@@ -1001,7 +1047,7 @@ class App:
         """Read episode count from UI (custom entry or dropdown). Returns int."""
         episodes = None
         try:
-            custom = self._episodes_entry.get().strip()
+            custom = self._train_episodes_entry.get().strip()
             if custom:
                 episodes = int(custom)
         except Exception:
@@ -1009,7 +1055,7 @@ class App:
 
         if episodes is None:
             try:
-                episodes = int(self._episodes_var.get())
+                episodes = int(self._train_episodes_var.get())
             except Exception:
                 episodes = 1
 
@@ -1051,6 +1097,62 @@ class App:
             return disp
         except Exception:
             return None
+
+    def _select_agent(self, key: str, button: tk.Button):
+        """Select the agent identified by `key` and highlight the provided button.
+
+        This centralizes selection/highlighting so all agent buttons behave
+        consistently. `key` should be one of: 'random', 'baseline', 'rl', 'hybrid'.
+        """
+        try:
+            # un-highlight all
+            for k, b in getattr(self, '_agent_buttons', {}).items():
+                try:
+                    b.config(relief='raised')
+                except Exception:
+                    pass
+            # highlight the selected button
+            try:
+                button.config(relief='sunken')
+            except Exception:
+                pass
+            # store selection
+            self.selected_agent = key
+            # update status bar
+            try:
+                pretty = {'random': 'Random agent', 'baseline': 'Baseline agent', 'rl': 'RL agent', 'hybrid': 'Hybrid agent'}.get(key, str(key))
+                self.update_status(f"Selected: {pretty}")
+            except Exception:
+                pass
+        except Exception:
+            try:
+                self.selected_agent = key
+            except Exception:
+                pass
+
+    def start_selected_agent(self):
+        """Dispatch to the configured start_* method for the selected agent."""
+        key = getattr(self, 'selected_agent', None)
+        if not key:
+            self.update_status("Status: No agent selected")
+            return
+        mapping = {
+            'random': self.start_random_agent,
+            'baseline': self.start_baseline_agent,
+            'rl': self.start_rl_agent,
+            'hybrid': self.start_hybrid_agent,
+        }
+        fn = mapping.get(key)
+        if fn is None:
+            self.update_status(f"Status: Unknown agent '{key}'")
+            return
+        try:
+            fn()
+        except Exception as e:
+            try:
+                self.update_status(f"Status: Failed to start agent: {e}")
+            except Exception:
+                pass
 
     def _instantiate_agent(self, env, module_name: str = None, class_name: str = None, agent_init_kwargs: dict = None, worker_callable=None, task_kwargs: dict = None, agent_name: str = None):
         """Resolve and instantiate an agent class given various hints.
