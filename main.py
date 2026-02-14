@@ -413,34 +413,9 @@ class App:
         if not hasattr(self, 'game') or self.game is None:
             raise RuntimeError("Game not initialized")
 
-        mod = importlib.import_module(module_name)
-        AgentClass = getattr(mod, class_name)
-
         env = MSEnv(self.game)
-        init_kwargs = dict(agent_init_kwargs) if agent_init_kwargs else {}
-
-        # special-case: allow providing a baseline spec via '_baseline' key so
-        # Hybrid_Agent can be instantiated with a baseline instance.
-        baseline_instance = None
-        if '_baseline' in init_kwargs:
-            bspec = init_kwargs.pop('_baseline')
-            # if a dict is provided, import and instantiate the baseline class
-            if isinstance(bspec, dict):
-                try:
-                    bm = importlib.import_module(bspec.get('module'))
-                    BClass = getattr(bm, bspec.get('class'))
-                    bkwargs = bspec.get('kwargs', {}) or {}
-                    baseline_instance = BClass(env, **bkwargs) if bkwargs else BClass(env)
-                except Exception:
-                    baseline_instance = None
-            else:
-                # assume it's already an instance
-                baseline_instance = bspec
-
-        if baseline_instance is not None:
-            agent = AgentClass(env, baseline_instance)
-        else:
-            agent = AgentClass(env, **init_kwargs) if init_kwargs else AgentClass(env)
+        # centralized resolution/instantiation helper handles baseline injection
+        AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(env, module_name=module_name, class_name=class_name, agent_init_kwargs=agent_init_kwargs, worker_callable=None, task_kwargs=run_kwargs, agent_name=None)
 
         run_kwargs = run_kwargs or {}
 
@@ -455,10 +430,7 @@ class App:
         # per-run EpisodeProgressDisplay will be created instead of a global visualization
 
         # create a per-run EpisodeProgressDisplay and composite progress callback
-        try:
-            ep_display = EpisodeProgressDisplay(title=f"{agent_name} Progress", master=self.root)
-        except Exception:
-            ep_display = None
+        ep_display = self._create_episode_display(agent_name, run_kwargs.get('difficulty'), episodes)
 
         def _progress_cb(info):
             try:
@@ -535,34 +507,8 @@ class App:
         episodes = int(run_args.pop('episodes', 1)) if 'episodes' in run_args else 1
         agent_name = agent_name or run_args.pop('agent_name', None) or module_name or 'agent'
 
-        # create per-run EpisodeProgressDisplay on GUI thread
-        try:
-            def _create_display():
-                try:
-                    return EpisodeProgressDisplay(title=f"{agent_name} Progress", master=self.root)
-                except Exception:
-                    return None
-            ep_display = None
-            try:
-                ep_display = _create_display()
-            except Exception:
-                ep_display = None
-        except Exception:
-            ep_display = None
-
-        # helper to call GUI updates safely
-        def schedule_episode_summary(index, res):
-            try:
-                res_with_run = dict(res or {})
-                if run_id is not None:
-                    res_with_run['_run_id'] = run_id
-                # schedule _handle_episode_progress on GUI thread
-                try:
-                    self.root.after(0, lambda: self._handle_episode_progress(agent_name, index, res_with_run, episodes))
-                except Exception:
-                    pass
-            except Exception:
-                pass
+        # create per-run EpisodeProgressDisplay on the GUI thread
+        ep_display = self._create_episode_display(agent_name, difficulty, episodes)
 
         # start Playwright and run the agent
         playwright = None
@@ -580,79 +526,12 @@ class App:
             game = Game(page)
             env = MSEnv(game)
 
-            # import agent module and class if module_name provided via task_kwargs
-            # allow worker_callable to be a reference to a function (not used)
-            # decide agent class name heuristically from provided callables
-            # If '_baseline' supplied as spec in agent_init_kwargs, instantiate baseline
-            # Build agent instance
-            # Decide module/class: task_kwargs may contain keys to indicate which agent
-            # We'll inspect run_args for typical keys.
-            # If worker_callable is a bound method like self._run_rl_agent, use its name mapping
-            target_module = None
-            target_class_name = None
-            # infer from provided agent_name: common values: 'RL agent' -> DQNAgent, 'Hybrid agent' -> Hybrid_Agent
-            if module_name and module_name in ('RL_agent', 'baseline_agent', 'random_agent'):
-                target_module = importlib.import_module(module_name)
-                # choose class
-                if module_name == 'RL_agent':
-                    # default to DQNAgent unless Hybrid_Agent requested via agent_name
-                    if 'Hybrid' in agent_name or 'Hybrid' in (task_kwargs.get('agent_name') or ''):
-                        target_class_name = 'Hybrid_Agent'
-                    else:
-                        target_class_name = 'DQNAgent'
-                elif module_name == 'baseline_agent':
-                    target_class_name = 'BaselineAgent'
-                elif module_name == 'random_agent':
-                    target_class_name = 'RandomAgent'
-
-            # fallback: try to inspect worker_callable for target
-            if target_module is None and worker_callable is not None:
-                # attempt to map function object names to module/classes
-                # if caller passed _run_rl_agent, map to RL_agent.DQNAgent
-                name = getattr(worker_callable, '__name__', '')
-                if 'rl' in name.lower():
-                    target_module = importlib.import_module('RL_agent')
-                    target_class_name = 'DQNAgent'
-                elif 'baseline' in name.lower():
-                    target_module = importlib.import_module('baseline_agent')
-                    target_class_name = 'BaselineAgent'
-                elif 'random' in name.lower():
-                    target_module = importlib.import_module('random_agent')
-                    target_class_name = 'RandomAgent'
-
-            if target_module is None:
-                # last resort: default to RL_agent.DQNAgent
-                target_module = importlib.import_module('RL_agent')
-                target_class_name = target_class_name or 'DQNAgent'
-
-            AgentClass = getattr(target_module, target_class_name)
-
-            # handle baseline spec passed via agent_init in task_kwargs
-            agent_init_kwargs = task_kwargs.get('agent_init_kwargs') if isinstance(task_kwargs.get('agent_init_kwargs'), dict) else {}
-            baseline_instance = None
-            if '_baseline' in agent_init_kwargs:
-                bspec = agent_init_kwargs.get('_baseline')
-                if isinstance(bspec, dict):
-                    try:
-                        bm = importlib.import_module(bspec.get('module'))
-                        BClass = getattr(bm, bspec.get('class'))
-                        bkwargs = bspec.get('kwargs', {}) or {}
-                        baseline_instance = BClass(env, **bkwargs) if bkwargs else BClass(env)
-                    except Exception:
-                        baseline_instance = None
-                else:
-                    baseline_instance = bspec
-
-            if baseline_instance is not None:
-                agent = AgentClass(env, baseline_instance)
-            else:
-                # allow agent init kwargs to be passed via task_kwargs
-                init_kw = task_kwargs.get('agent_init_kwargs') or {}
-                try:
-                    agent = AgentClass(env, **init_kw) if init_kw else AgentClass(env)
-                except Exception:
-                    # fallback to simple init
-                    agent = AgentClass(env)
+            # centralize agent resolution and instantiation
+            AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(env, module_name=module_name, class_name=None, agent_init_kwargs=task_kwargs.get('agent_init_kwargs'), worker_callable=worker_callable, task_kwargs=task_kwargs, agent_name=agent_name)
+            try:
+                print(f"[DEBUG] own_playwright selected AgentClass={resolved_module}.{resolved_class}, baseline_instantiated={hasattr(agent, '__class__')}")
+            except Exception:
+                pass
 
             # define progress callback used by agent.run_num_episodes
             def progress_cb(info: dict):
@@ -1135,6 +1014,130 @@ class App:
                 episodes = 1
 
         return max(1, int(episodes))
+
+    def _create_episode_display(self, agent_name: str, difficulty: str, episodes: int):
+        """Create an EpisodeProgressDisplay on the Tk main thread and populate static labels.
+
+        Returns the created display or None.
+        """
+        holder = {'disp': None}
+        def _create_on_main():
+            try:
+                holder['disp'] = EpisodeProgressDisplay(title=f"{agent_name} Progress", master=self.root)
+            except Exception:
+                holder['disp'] = None
+
+        try:
+            self.root.after(0, _create_on_main)
+            import time
+            deadline = time.time() + 5.0
+            while time.time() < deadline and holder['disp'] is None:
+                time.sleep(0.05)
+            disp = holder.get('disp')
+            if disp is not None:
+                try:
+                    disp.set_agent(agent_name)
+                except Exception:
+                    pass
+                try:
+                    if difficulty is not None:
+                        disp.set_difficulty(difficulty)
+                except Exception:
+                    pass
+                try:
+                    disp.set_run_progress(0, episodes)
+                except Exception:
+                    pass
+            return disp
+        except Exception:
+            return None
+
+    def _instantiate_agent(self, env, module_name: str = None, class_name: str = None, agent_init_kwargs: dict = None, worker_callable=None, task_kwargs: dict = None, agent_name: str = None):
+        """Resolve and instantiate an agent class given various hints.
+
+        Returns a tuple (AgentClass, agent_instance, resolved_module_name, resolved_class_name).
+        """
+        task_kwargs = dict(task_kwargs or {})
+        # determine target module/class
+        target_module = None
+        target_class_name = class_name
+
+        if module_name and module_name in ('RL_agent', 'baseline_agent', 'random_agent'):
+            target_module = importlib.import_module(module_name)
+            if module_name == 'RL_agent':
+                # prefer Hybrid if agent_name or task hints include it
+                if (agent_name and 'hybrid' in agent_name.lower()) or ('hybrid' in (task_kwargs.get('agent_name') or '').lower()):
+                    target_class_name = 'Hybrid_Agent'
+                else:
+                    target_class_name = target_class_name or 'DQNAgent'
+            elif module_name == 'baseline_agent':
+                target_class_name = target_class_name or 'BaselineAgent'
+            elif module_name == 'random_agent':
+                target_class_name = target_class_name or 'RandomAgent'
+
+        # fallback to worker_callable name mapping
+        if target_module is None and worker_callable is not None:
+            name = getattr(worker_callable, '__name__', '') or ''
+            nlow = name.lower()
+            if 'hybrid' in nlow:
+                target_module = importlib.import_module('RL_agent')
+                target_class_name = 'Hybrid_Agent'
+            elif 'rl' in nlow:
+                target_module = importlib.import_module('RL_agent')
+                target_class_name = 'DQNAgent'
+            elif 'baseline' in nlow:
+                target_module = importlib.import_module('baseline_agent')
+                target_class_name = 'BaselineAgent'
+            elif 'random' in nlow:
+                target_module = importlib.import_module('random_agent')
+                target_class_name = 'RandomAgent'
+
+        # last resort
+        if target_module is None:
+            target_module = importlib.import_module('RL_agent')
+            target_class_name = target_class_name or 'DQNAgent'
+
+        AgentClass = getattr(target_module, target_class_name)
+
+        # baseline handling
+        init_kwargs = dict(agent_init_kwargs) if isinstance(agent_init_kwargs, dict) else {}
+        baseline_instance = None
+        if '_baseline' in init_kwargs:
+            bspec = init_kwargs.pop('_baseline')
+            if isinstance(bspec, dict):
+                try:
+                    bm = importlib.import_module(bspec.get('module'))
+                    BClass = getattr(bm, bspec.get('class'))
+                    bkwargs = bspec.get('kwargs', {}) or {}
+                    baseline_instance = BClass(env, **bkwargs) if bkwargs else BClass(env)
+                except Exception:
+                    baseline_instance = None
+            else:
+                baseline_instance = bspec
+
+        # if class needs baseline and none provided, try to instantiate default
+        try:
+            if baseline_instance is None and target_class_name == 'Hybrid_Agent':
+                try:
+                    bm = importlib.import_module('baseline_agent')
+                    BClass = getattr(bm, 'BaselineAgent')
+                    baseline_instance = BClass(env)
+                except Exception:
+                    baseline_instance = None
+        except Exception:
+            baseline_instance = None
+
+        # instantiate agent
+        if baseline_instance is not None:
+            agent = AgentClass(env, baseline_instance)
+        else:
+            try:
+                init_kw = task_kwargs.get('agent_init_kwargs') or init_kwargs or {}
+                agent = AgentClass(env, **init_kw) if init_kw else AgentClass(env)
+            except Exception:
+                agent = AgentClass(env)
+
+        return AgentClass, agent, target_module.__name__, target_class_name
 
     # Global visualization removed; per-run EpisodeProgressDisplay windows are used instead.
         
