@@ -14,6 +14,8 @@ class Game:
         self.page = page
         self.w: int = -1
         self.h: int = -1
+        # track the last-started difficulty (normalized: beginner/intermediate/expert)
+        self.current_diff: Optional[str] = None
 
     def new_game(self, difficulty: str) -> None:
         """Start a new game on the website and set board dimensions."""
@@ -26,6 +28,21 @@ class Game:
         else:  # expert
             diff = "expert"
             self.w, self.h = 30, 16
+        # If difficulty hasn't changed since last new game, click the face
+        # element (class starts with 'face') to start a fresh board instead
+        # of re-navigating.
+        if diff == self.current_diff:
+            print("Difficulty unchanged; clicking #face to start new game")
+            try:
+                self.page.locator("#face").click()
+            except Exception:
+                print("Warning: clicking #face failed; falling back to navigation")
+            try:
+                self.page.wait_for_selector("#game", timeout=10000)
+                return
+            except Exception:
+                print("Warning: #game selector not found after clicking face")
+      
 
         url = f"https://minesweeperonline.com/#{diff}"
         print(f"Navigating to {url}")
@@ -51,6 +68,8 @@ class Game:
             print("Error: #game selector not found after navigation/reload")
             # if the selector doesn't appear, raise to signal failure
             raise
+        # record the difficulty we just started
+        self.current_diff = diff
 
     def _check_bounds(self, x: int, y: int) -> None:
         if x < 1 or x > self.w or y < 1 or y > self.h:
