@@ -529,7 +529,7 @@ class App:
             # centralize agent resolution and instantiation
             AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(env, module_name=module_name, class_name=None, agent_init_kwargs=task_kwargs.get('agent_init_kwargs'), worker_callable=worker_callable, task_kwargs=task_kwargs, agent_name=agent_name)
             try:
-                print(f"[DEBUG] own_playwright selected AgentClass={resolved_module}.{resolved_class}, baseline_instantiated={hasattr(agent, '__class__')}")
+                pass
             except Exception:
                 pass
 

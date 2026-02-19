@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from Game import MSEnv
 from agent_interface import agent_interface
 
+from utils import get_unrevealed_cells
+
 from config import *
 
 Transition = namedtuple('Transition',
@@ -364,15 +366,7 @@ class Hybrid_Agent(RL_agent):
             return t
 
         # initial random left-click to start the board (do not record in memory)
-        unrevealed = []
-        for r in range(h):
-            for c in range(w):
-                try:
-                    v = state[r][c]
-                except Exception:
-                    v = -1
-                if v < 0:
-                    unrevealed.append((c + 1, r + 1))
+        unrevealed = get_unrevealed_cells(state)
         if unrevealed:
             cx, cy = random.choice(unrevealed)
             try:

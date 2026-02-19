@@ -30,6 +30,7 @@ from typing import Dict, Any, List, Tuple
 
 from Game import MSEnv
 from agent_interface import agent_interface
+from utils import get_unrevealed_cells
 
 
 def _neighbors(r: int, c: int, w: int, h: int) -> List[Tuple[int, int]]:
@@ -134,15 +135,7 @@ class BaselineAgent(agent_interface):
             dedup_actions = flag_actions + click_actions
             # If no deterministic actions found, pick a random unrevealed cell
             if not dedup_actions:
-                unrevealed = []
-                for r in range(h):
-                    for c in range(w):
-                        try:
-                            v = state[r][c]
-                        except Exception:
-                            v = -1
-                        if v < 0:
-                            unrevealed.append((c + 1, r + 1))
+                unrevealed = get_unrevealed_cells(state)
                 if not unrevealed:
                     # nothing left to click
                     break

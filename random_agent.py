@@ -24,6 +24,7 @@ from typing import Dict, Any
 
 from Game import MSEnv
 from agent_interface import agent_interface
+from utils import get_unrevealed_cells
 
 
 class RandomAgent(agent_interface):
@@ -48,15 +49,7 @@ class RandomAgent(agent_interface):
 
         while steps < max_steps and not done:
             # collect unrevealed cells (value < 0)
-            unrevealed = []
-            for r in range(h):
-                for c in range(w):
-                    try:
-                        v = state[r][c]
-                    except Exception:
-                        v = -1
-                    if v < 0:
-                        unrevealed.append((c + 1, r + 1))
+            unrevealed = get_unrevealed_cells(state)
 
             if not unrevealed:
                 # nothing left to click
