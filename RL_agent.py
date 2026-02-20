@@ -1,9 +1,9 @@
 from collections import namedtuple, deque
 import math
 import random
-from torch import device, nn
-from torch import optim
 import torch
+import torch.nn as nn
+from torch import optim
 import torch.nn.functional as F
 
 from Game import MSEnv
@@ -86,31 +86,74 @@ class RL_agent(agent_interface):
         
         # epsilon decay parameters
         self.steps_done = 0
+        # active network boolean: False -> policy (default), True -> target
+        self.use_target_active = False
 
-    def select_action(self, state):
-        sample = random.random()
-        
-        eps_threshold = EPS_END + (EPS_START - EPS_END) * \
-        math.exp(-1. * self.steps_done / EPS_DECAY)
+    def predict_net_q(self, state, use_target: bool = None):
+        """Run a forward pass on the selected network and return Q-values.
 
-        # obtain actionable mask (Game.get_actionable_mask may return one entry per cell)
+        Args:
+            state: preprocessed state tensor (may be on CPU or device)
+            use_target: if True use `self.target_net`, False use `self.policy_net`.
+                        If None, falls back to `self.use_target_active`.
+
+        Returns:
+            Tensor of Q-values (no masking applied).
+        """
+        if use_target is None:
+            use_target = bool(getattr(self, 'use_target_active', False))
+
+        net = self.target_net if use_target else self.policy_net
+        with torch.no_grad():
+            return net(state.to(self.device))  # -> torch.Tensor
+
+    def action_mask_tensor(self):
+        """Return the actionable mask as a boolean tensor on the agent device.
+
+        This normalizes masks that may be encoded as two entries per cell
+        (e.g. left/right) into a single boolean per cell by OR-ing pairs.
+        """
         actionmask = self.env.game.get_actionable_mask()
         tensor_actionmask = torch.tensor(actionmask, dtype=torch.bool, device=self.device)
-
-        # If mask was accidentally returned as per-action (2 entries per cell),
-        # convert it to one-per-cell by OR-ing left/right entries.
         if tensor_actionmask.numel() == (self.n_actions * 2):
             tensor_actionmask = tensor_actionmask.view(-1, 2).any(1)
+        return tensor_actionmask
 
-        # run network to get Q-values
-        with torch.no_grad():
-            result = self.policy_net(state)  # expected shape [1, n_actions]
+    def select_action(self, state, use_target: bool = None):
+        """Select an action index tensor using the policy or target network.
 
-        # ensure mask shape matches result: if result is 2D and mask is 1D,
-        # unsqueeze to [1, n_actions] so boolean indexing broadcasts correctly.
-        mask = tensor_actionmask
-        if tensor_actionmask.dim() == 1 and result.dim() == 2:
+        Args:
+            state: preprocessed state tensor (batch dim expected)
+            use_target: if True, use `self.target_net` and act deterministically
+                        (greedy). If False, use policy net with epsilon-greedy.
+
+        Returns:
+            torch.LongTensor shaped (1,1) containing the chosen action index.
+        """
+        # determine network choice from flag or active boolean
+        if use_target is None:
+            use_target = bool(getattr(self, 'use_target_active', False))
+
+        # run the chosen network and obtain Q-values
+        result = self.predict_net_q(state, use_target=use_target)
+
+        # obtain actionable mask and ensure shape matches the network output
+        tensor_actionmask = self.action_mask_tensor()
+        # normalize mask shape to match network output (batch dim)
+        if result.dim() == 2 and tensor_actionmask.dim() == 1:
             mask = tensor_actionmask.unsqueeze(0)
+        else:
+            mask = tensor_actionmask
+
+        # If using target network, act greedily (deterministic)
+        if use_target:
+            res_clone = result.clone()
+            res_clone[~mask] = -float('inf')
+            return res_clone.max(1)[1].view(1, 1)
+
+        # otherwise use epsilon-greedy on policy net
+        sample = random.random()
+        eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * self.steps_done / EPS_DECAY)
 
         if sample > eps_threshold:
             result_clone = result.clone()
@@ -120,17 +163,17 @@ class RL_agent(agent_interface):
         else:
             # select random action from actionable actions (use first row if 2D)
             if mask.dim() == 2:
-                valid = torch.nonzero(mask[0]).squeeze().tolist()
+                valid_idx = torch.nonzero(mask[0], as_tuple=False).view(-1).tolist()
             else:
-                valid = torch.nonzero(mask).squeeze().tolist()
-            if isinstance(valid, int):
-                valid = [valid]
-            chosen_index = random.choice(valid)
+                valid_idx = torch.nonzero(mask, as_tuple=False).view(-1).tolist()
+            if not valid_idx:
+                raise RuntimeError("No valid actions available for random selection")
+            chosen_index = random.choice(valid_idx)
             return torch.tensor([[chosen_index]], device=self.device, dtype=torch.long)
             
-    def select_action_tuple(self, state, epsilon = 0.1):
+    def select_action_tuple(self, state, epsilon = 0.1, use_target: bool = None):
         '''Select action as (x, y, mode) tuple'''
-        action_index = self.select_action(state).item()
+        action_index = self.select_action(state, use_target=use_target).item()
         # network outputs one Q per cell; default to left click
         cell_index = action_index
         mode = 'left'
@@ -138,6 +181,17 @@ class RL_agent(agent_interface):
         x = (cell_index % self.env.game.w) + 1        # 1-based coordinates
         y = (cell_index // self.env.game.w) + 1       # 1-based coordinates
         return (x, y, mode)
+
+    def set_use_target(self, flag: bool):
+        """Set whether action selection should default to the target network.
+
+        Args:
+            flag: True to use the target network by default, False to use policy.
+        """
+        try:
+            self.use_target_active = bool(flag)
+        except Exception:
+            raise ValueError('flag must be convertible to bool')
 
     def preprocess_state(self, state, pad: int = None):
         """Preprocess a 2D game state into 3 channels with padding.
@@ -200,14 +254,19 @@ class RL_agent(agent_interface):
             dtype=torch.bool
         )
 
-        non_final_next_states = torch.cat(
-            [s for s in batch.next_state if s is not None]
-        ).to(self.device)
+        # Safely construct non-final next states and masks (handle empty lists)
+        next_state_list = [s for s in batch.next_state if s is not None]
+        if len(next_state_list) > 0:
+            non_final_next_states = torch.cat(next_state_list).to(self.device)
+        else:
+            non_final_next_states = torch.empty(0, *state_batch.shape[1:], device=self.device)
 
         # gather masks aligned with non-final states
-        next_masks = torch.stack([
-            m for s, m in zip(batch.next_state, batch.mask) if s is not None
-        ]).to(self.device)
+        next_masks_list = [m for s, m in zip(batch.next_state, batch.mask) if s is not None]
+        if len(next_masks_list) > 0:
+            next_masks = torch.stack(next_masks_list).to(self.device)
+        else:
+            next_masks = torch.empty(0, dtype=torch.bool, device=self.device)
 
         # Q(s,a)
         q_sa = self.policy_net(state_batch).gather(1, action_batch)
