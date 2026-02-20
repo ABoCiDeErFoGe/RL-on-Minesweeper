@@ -13,6 +13,8 @@ from utils import get_unrevealed_cells
 
 from config import *
 
+from datetime import datetime 
+
 Transition = namedtuple('Transition',
             ('state','action','next_state','reward','mask'))
 
@@ -60,6 +62,17 @@ class DQN(nn.Module):
 class RL_agent(agent_interface):
     def __init__(self, env: MSEnv) -> None:
         self.env = env
+        # store relevant config values from config.py into the agent
+        self.BATCH_SIZE = BATCH_SIZE
+        self.GAMMA = GAMMA
+        self.EPS_START = EPS_START
+        self.EPS_END = EPS_END
+        self.EPS_DECAY = EPS_DECAY
+        self.TAU = TAU
+        self.LR = LR
+        # a dict view of the config (constructed from agent attributes)
+        self.config_dict = self.get_config_dict()
+
         self.initialize_network()
         
     # reinitialize DQN based on the network
@@ -77,7 +90,7 @@ class RL_agent(agent_interface):
         self.target_net = DQN(3, self.padded_h, self.padded_w, self.n_actions)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LR, amsgrad=True)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.LR, amsgrad=True)
         self.memory = ReplayMemory(10000)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,6 +101,64 @@ class RL_agent(agent_interface):
         self.steps_done = 0
         # active network boolean: False -> policy (default), True -> target
         self.use_target_active = False
+
+    def get_config_dict(self):
+        """Return a dictionary of agent configuration values."""
+        return {
+            "BATCH_SIZE": self.BATCH_SIZE,
+            "GAMMA": self.GAMMA,
+            "EPS_START": self.EPS_START,
+            "EPS_END": self.EPS_END,
+            "EPS_DECAY": self.EPS_DECAY,
+            "TAU": self.TAU,
+            "LR": self.LR,
+        }
+
+    def save_checkpoint(self, path: str) -> None:
+        """Save model + optimizer state and agent config to `path`."""
+        checkpoint = {
+            "policy_state": self.policy_net.state_dict(),
+            "target_state": self.target_net.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "steps_done": self.steps_done,
+            "difficulty": self.env.game.difficulty,
+            "config": self.get_config_dict(),
+            "agent_class": self.__class__.__name__,
+        }
+        self._set_meta(checkpoint)
+        torch.save(checkpoint, path)
+
+    def load_checkpoint(self, path: str, map_location=None) -> None:
+        """Load checkpoint from `path` and restore networks/optimizer/steps.
+
+        If the saved config differs from the current agent config, a warning
+        is printed but loading proceeds.
+        """
+        ckpt = torch.load(path, map_location=map_location)
+        
+        # check if class matches (not strictly required, but likely a sign of user error if not)
+        saved_class = ckpt.get("agent_class")
+        if saved_class and saved_class != self.__class__.__name__:
+            raise ValueError(f"Checkpoint agent class '{saved_class}' does not match current agent class '{self.__class__.__name__}'")
+        
+        if "policy_state" in ckpt:
+            self.policy_net.load_state_dict(ckpt["policy_state"])
+        if "target_state" in ckpt:
+            self.target_net.load_state_dict(ckpt["target_state"])
+        if "optimizer_state" in ckpt and self.optimizer is not None:
+            try:
+                self.optimizer.load_state_dict(ckpt["optimizer_state"])
+            except Exception:
+                print("Warning: failed to load optimizer state; continuing")
+        self.steps_done = ckpt.get("steps_done", self.steps_done)
+        saved_cfg = ckpt.get("config")
+        if saved_cfg is not None and saved_cfg != self.get_config_dict():
+            print("Warning: loaded checkpoint config differs from current agent config")
+        
+        # recreate environment with saved difficulty if available
+        saved_diff = ckpt.get("difficulty")
+        if saved_diff is not None:
+            self.env.reset(saved_diff)
 
     def predict_net_q(self, state, use_target: bool = None):
         """Run a forward pass on the selected network and return Q-values.
@@ -153,7 +224,7 @@ class RL_agent(agent_interface):
 
         # otherwise use epsilon-greedy on policy net
         sample = random.random()
-        eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * self.steps_done / EPS_DECAY)
+        eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * self.steps_done / self.EPS_DECAY)
 
         if sample > eps_threshold:
             result_clone = result.clone()
@@ -238,10 +309,10 @@ class RL_agent(agent_interface):
         return stacked.tolist()
     
     def optimize_model(self):
-        if len(self.memory) < BATCH_SIZE:
+        if len(self.memory) < self.BATCH_SIZE:
             return
 
-        transitions = self.memory.sample(BATCH_SIZE)
+        transitions = self.memory.sample(self.BATCH_SIZE)
         batch = Transition(*zip(*transitions))
 
         state_batch  = torch.cat(batch.state).to(self.device)
@@ -271,7 +342,7 @@ class RL_agent(agent_interface):
         # Q(s,a)
         q_sa = self.policy_net(state_batch).gather(1, action_batch)
 
-        next_state_values = torch.zeros(BATCH_SIZE, device=self.device)
+        next_state_values = torch.zeros(self.BATCH_SIZE, device=self.device)
 
         with torch.no_grad():
             if non_final_next_states.size(0) > 0:
@@ -295,7 +366,7 @@ class RL_agent(agent_interface):
 
                 next_state_values[non_final_mask] = next_vals
 
-        expected = reward_batch + GAMMA * next_state_values
+        expected = reward_batch + self.GAMMA * next_state_values
 
         loss = F.smooth_l1_loss(q_sa, expected.unsqueeze(1))
 
@@ -329,6 +400,7 @@ class DQNAgent(RL_agent):
         total_reward = 0
         history = []
         done = False
+        current_gamma = self.GAMMA
 
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
@@ -351,6 +423,8 @@ class DQNAgent(RL_agent):
             # execute action in environment
             try:
                 next_state, reward, done, info = self.env.step((x, y, mode))
+                reward = reward * current_gamma
+                current_gamma *= self.GAMMA
             except Exception as e:
                 # if execution failed, stop episode
                 return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": 0, "error": str(e)}
@@ -383,8 +457,8 @@ class DQNAgent(RL_agent):
             # soft update target network (polyak)
             with torch.no_grad():
                 for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
-                    tp.data.mul_(1.0 - TAU)
-                    tp.data.add_(TAU * pp.data)
+                    tp.data.mul_(1.0 - self.TAU)
+                    tp.data.add_(self.TAU * pp.data)
 
             # advance state
             state = next_state
@@ -396,8 +470,15 @@ class DQNAgent(RL_agent):
 
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None", 'win': info.get('win', False)}
 
-    # run_num_episodes inherited from agent_interface
+    # Expose checkpoint helpers on the concrete agent class
+    def save_checkpoint(self, path: str) -> None:
+        """Save agent checkpoint (policy, target, optimizer, steps, config)."""
+        super().save_checkpoint(path + "_pure_rl" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pth")
 
+    def load_checkpoint(self, path: str, map_location=None) -> None:
+        """Load agent checkpoint and restore networks/optimizer/steps."""
+        super().load_checkpoint(path, map_location=map_location)
+    
 class Hybrid_Agent(RL_agent):
     def __init__(self, env: MSEnv, baseline_agent) -> None:
         super().__init__(env)
@@ -406,9 +487,10 @@ class Hybrid_Agent(RL_agent):
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
                 
         w = self.env.game.w
+        h = self.env.game.h
         state = self.env.reset(difficulty=difficulty)
         
-        if (w != self.env.game.w):
+        if (w != self.env.game.w or h != self.env.game.h):
             self.initialize_network()  # reinitialize network for new difficulty
         w = self.env.game.w
         h = self.env.game.h
@@ -418,6 +500,7 @@ class Hybrid_Agent(RL_agent):
         history = []
         done = False
         random_click = 0
+        current_gamma = self.GAMMA
         # helper to convert board state (2D list) to tensor on device
         def state_to_tensor(s):
             chs = self.preprocess_state(s)
@@ -509,6 +592,8 @@ class Hybrid_Agent(RL_agent):
                 # execute action in environment
                 try:
                     next_state, reward, done, info = self.env.step((x, y, mode))
+                    reward = reward * current_gamma
+                    current_gamma *= self.GAMMA
                 except Exception as e:
                     return {"steps": steps, "reward": total_reward, "done": True, "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False), "error": str(e)}
 
@@ -539,8 +624,8 @@ class Hybrid_Agent(RL_agent):
                 self.optimize_model()
                 with torch.no_grad():
                     for tp, pp in zip(self.target_net.parameters(), self.policy_net.parameters()):
-                        tp.data.mul_(1.0 - TAU)
-                        tp.data.add_(TAU * pp.data)
+                        tp.data.mul_(1.0 - self.TAU)
+                        tp.data.add_(self.TAU * pp.data)
 
                 # advance state
                 state = next_state
@@ -556,5 +641,14 @@ class Hybrid_Agent(RL_agent):
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": random_click, "win": info.get('win', False)}
     
     # run_num_episodes inherited from agent_interface
+
+    # Expose checkpoint helpers on the concrete agent class
+    def save_checkpoint(self, path: str) -> None:
+        """Save agent checkpoint (policy, target, optimizer, steps, config)."""
+        super().save_checkpoint(path + "_hybrid_" + datetime.now().strftime("%Y%m%d_%H%M%S")+".pth")
+
+    def load_checkpoint(self, path: str, map_location=None) -> None:
+        """Load agent checkpoint and restore networks/optimizer/steps."""
+        super().load_checkpoint(path, map_location=map_location)
         
         
