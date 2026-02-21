@@ -14,6 +14,7 @@ then render the final state plus a click-order footer for analysis.
 import threading
 import queue
 import tkinter as tk
+from tkinter import messagebox
 from playwright.sync_api import sync_playwright
 from Game import Game
 import importlib
@@ -21,6 +22,8 @@ from Game import MSEnv
 from utils import extract_random_clicks
 from episode_progress_display import EpisodeProgressDisplay
 from config import ROWS, COLUMNS, CELL_SIZE, FLAG_CHAR, BOMB_CHAR, NUMBER_COLOR_MAP
+from config import BATCH_SIZE, GAMMA, EPS_START, EPS_END, EPS_DECAY, TAU, LR
+import tkinter.messagebox as messagebox
 
 class App:
     def __init__(self):
@@ -121,7 +124,31 @@ class App:
     def update_status(self, message):
         """Update the status label in a thread-safe manner."""
         # Always schedule label updates on the main (GUI) thread.
-        self.root.after(0, lambda: self.status_label.config(text=message))
+        def _do_update():
+            try:
+                if hasattr(self, 'status_label') and self.status_label is not None:
+                    try:
+                        self.status_label.config(text=message)
+                        return
+                    except Exception:
+                        pass
+                # fallback: update window title so user still sees a status
+                try:
+                    self.root.title(message)
+                except Exception:
+                    # final fallback: print to stdout
+                    try:
+                        print(message)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            self.root.after(0, _do_update)
+        except Exception:
+            # if scheduling fails, try immediate update
+            _do_update()
 
     def _place_label(self, cell, text, fg=None, bold=False, bind_right_click=False, coord=None):
         """Create and place a centered Label inside `cell` with font sized to CELL_SIZE.
@@ -383,7 +410,9 @@ class App:
         rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
         if agent_name:
             rw['agent_name'] = agent_name
-        return self._run_agent(module_name="RL_agent", class_name="DQNAgent", agent_init_kwargs=None, run_kwargs=rw)
+        # build agent init kwargs, merging any app-level hyperparams
+        init_kw = self._build_agent_init_kwargs(None)
+        return self._run_agent(module_name="RL_agent", class_name="DQNAgent", agent_init_kwargs=init_kw, run_kwargs=rw)
 
     def _run_hybrid_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None, **kwargs):
         """Run the Hybrid_Agent which combines the baseline agent with DQN.
@@ -397,6 +426,7 @@ class App:
             rw['agent_name'] = agent_name
 
         init_kw = {'_baseline': {'module': 'baseline_agent', 'class': 'BaselineAgent', 'kwargs': {}}}
+        init_kw = self._build_agent_init_kwargs(init_kw)
         return self._run_agent(module_name="RL_agent", class_name="Hybrid_Agent", agent_init_kwargs=init_kw, run_kwargs=rw)
 
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
@@ -426,8 +456,6 @@ class App:
 
         if episodes <= 1:
             return agent.run_episode(**run_kwargs)
-
-        # per-run EpisodeProgressDisplay will be created instead of a global visualization
 
         # create a per-run EpisodeProgressDisplay and composite progress callback
         ep_display = self._create_episode_display(agent_name, run_kwargs.get('difficulty'), episodes)
@@ -476,6 +504,13 @@ class App:
             except Exception:
                 pass
 
+        # Update per-run display with agent hyperparameters if available.
+        # Ensure both the agent and the display exist, and schedule the
+        # update on the Tk main thread to avoid threading/timing issues.
+        try:
+            self._schedule_ep_display_hyperparams(ep_display, agent)
+        except Exception:
+            pass
         # let the agent run multiple episodes and provide per-episode progress
         results = agent.run_num_episodes(int(episodes), progress_update=_composite_progress, **run_kwargs)
 
@@ -530,6 +565,12 @@ class App:
             AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(env, module_name=module_name, class_name=None, agent_init_kwargs=task_kwargs.get('agent_init_kwargs'), worker_callable=worker_callable, task_kwargs=task_kwargs, agent_name=agent_name)
             try:
                 pass
+            except Exception:
+                pass
+
+            # If we created a per-run display, populate its hyperparameters
+            try:
+                self._schedule_ep_display_hyperparams(ep_display, agent)
             except Exception:
                 pass
 
@@ -809,6 +850,14 @@ class App:
         if run_id is not None:
             task_kwargs['_run_id'] = run_id
 
+        # Merge app-level hyperparams into the worker task's agent_init_kwargs
+        try:
+            merged = self._build_agent_init_kwargs(task_kwargs.get('agent_init_kwargs'))
+            if merged is not None:
+                task_kwargs['agent_init_kwargs'] = merged
+        except Exception:
+            pass
+
         task = {'func': worker_func, 'kwargs': task_kwargs, 'done': (lambda res, name=agent_name, rid=run_id: self._handle_agent_result(name, res, rid)),}
 
         # Start a dedicated run thread which creates its own Playwright instance
@@ -943,6 +992,21 @@ class App:
         self.grid_container.pack()
         self.build_grid(self.grid_container)
 
+        # Episode info frame (shows per-episode and aggregated statistics)
+        # Created here so it's present on startup and only once.
+        self.episode_info_frame = tk.Frame(self.left_column, relief='groove', bd=1)
+        tk.Label(self.episode_info_frame, text="Episode Info:").pack(anchor='w', padx=4)
+        self._episode_fields = {}
+        self._episode_fields['last'] = tk.Label(self.episode_info_frame, text="", anchor='w')
+        self._episode_fields['last'].pack(fill='x', padx=6)
+        self._episode_fields['summary'] = tk.Label(self.episode_info_frame, text="", anchor='w')
+        self._episode_fields['summary'].pack(fill='x', padx=6, pady=(0,4))
+        self.episode_info_frame.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+
+        # Status label placed below the grid in the left column
+        self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
+        self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+
         # Right: vertical buttons
         # Right: vertical buttons
         self.sidebar = tk.Frame(self.root)
@@ -1029,19 +1093,220 @@ class App:
         self._test_episodes_entry.insert(0, "0")
         self._test_episodes_entry.pack(side='left', padx=(6,0))
         
-        # Label indicating the progress, placed below the grid in the left column
-        # Episode info frame: shows per-episode and aggregated statistics
-        self.episode_info_frame = tk.Frame(self.left_column, relief='groove', bd=1)
-        tk.Label(self.episode_info_frame, text="Episode Info:").pack(anchor='w', padx=4)
-        self._episode_fields = {}
-        self._episode_fields['last'] = tk.Label(self.episode_info_frame, text="", anchor='w')
-        self._episode_fields['last'].pack(fill='x', padx=6)
-        self._episode_fields['summary'] = tk.Label(self.episode_info_frame, text="", anchor='w')
-        self._episode_fields['summary'].pack(fill='x', padx=6, pady=(0,4))
-        self.episode_info_frame.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+        # Hyperparameters panel (only affects upcoming RL/Hybrid agent)
+        hp_frame = tk.LabelFrame(self.sidebar, text="Hyperparameters", padx=4, pady=4)
+        hp_frame.pack(fill='x', pady=(6,6))
 
-        self.status_label = tk.Label(self.left_column, text="Status: Initializing...", anchor="w")
-        self.status_label.pack(side="bottom", fill="x", padx=4, pady=(6,0))
+        # store references to entry vars
+        self._hp_vars = {}
+
+        def _add_hp_row(frame, label_text, var_name, default, width=8):
+            row = tk.Frame(frame)
+            row.pack(fill='x', pady=(2,2))
+            tk.Label(row, text=label_text).pack(side='left')
+            v = tk.StringVar(value=str(default))
+            ent = tk.Entry(row, textvariable=v, width=width)
+            ent.pack(side='right')
+            self._hp_vars[var_name] = v
+
+        _add_hp_row(hp_frame, 'Batch size', 'BATCH_SIZE', BATCH_SIZE)
+        _add_hp_row(hp_frame, 'Gamma', 'GAMMA', GAMMA)
+        _add_hp_row(hp_frame, 'Eps start', 'EPS_START', EPS_START)
+        _add_hp_row(hp_frame, 'Eps end', 'EPS_END', EPS_END)
+        _add_hp_row(hp_frame, 'Eps decay', 'EPS_DECAY', EPS_DECAY)
+        _add_hp_row(hp_frame, 'Tau', 'TAU', TAU)
+        _add_hp_row(hp_frame, 'LR', 'LR', LR)
+
+        btns = tk.Frame(hp_frame)
+        btns.pack(fill='x', pady=(4,0))
+        apply_btn = tk.Button(btns, text='Apply', width=8, command=lambda: self._apply_hyperparams())
+        apply_btn.pack(side='left')
+        reset_btn = tk.Button(btns, text='Reset', width=8, command=lambda: self._reset_hyperparams())
+        reset_btn.pack(side='right')
+
+        # Error message for hyperparameter validation (wraps long text)
+        # Use tk.Message which handles wrapping more reliably than Label
+        try:
+            self._hp_error_label = tk.Message(hp_frame, text="", fg="red", anchor='w', justify='left', width = 170)
+            self._hp_error_label.pack(fill='x', pady=(4,0))
+        except Exception:
+            # fallback to Label if Message isn't available
+            self._hp_error_label = tk.Label(hp_frame, text="", fg="red", anchor='w', justify='left', wraplength=170)
+            self._hp_error_label.pack(fill='x', pady=(4,0))
+
+        # active hyperparams dict (used when instantiating agents)
+        self._agent_hyperparams = None
+
+        # Lock the root window to current size so it is fixed
+        try:
+            self.root.update_idletasks()
+            w = self.root.winfo_width()
+            h = self.root.winfo_height()
+            # set min/max to current size and disable resizing
+            self.root.minsize(w, h)
+            self.root.maxsize(w, h)
+        except Exception:
+            pass
+
+    def _reset_hyperparams(self):
+        # reset UI entries to defaults from config
+        defaults = {
+            'BATCH_SIZE': BATCH_SIZE,
+            'GAMMA': GAMMA,
+            'EPS_START': EPS_START,
+            'EPS_END': EPS_END,
+            'EPS_DECAY': EPS_DECAY,
+            'TAU': TAU,
+            'LR': LR,
+        }
+        for k, v in defaults.items():
+            try:
+                self._hp_vars[k].set(str(v))
+            except Exception:
+                pass
+        # clear any existing error message
+        try:
+            if hasattr(self, '_hp_error_label'):
+                self._hp_error_label.config(text="")
+        except Exception:
+            pass
+
+    def _apply_hyperparams(self):
+        """Validate hyperparameter entries and store them for next agent instantiation.
+
+        Validation rules enforced:
+        - BATCH_SIZE: int >= 1
+        - GAMMA: float in [0,1]
+        - EPS_START/EPS_END: floats in [0,1] with EPS_START >= EPS_END
+        - EPS_DECAY: int >= 1
+        - TAU: float in [0,1]
+        - LR: float > 0
+        """
+        # Validate each field individually so we can reset the invalid one
+        vals = {}
+        defaults = {
+            'BATCH_SIZE': BATCH_SIZE,
+            'GAMMA': GAMMA,
+            'EPS_START': EPS_START,
+            'EPS_END': EPS_END,
+            'EPS_DECAY': EPS_DECAY,
+            'TAU': TAU,
+            'LR': LR,
+        }
+
+        # clear previous error
+        try:
+            if hasattr(self, '_hp_error_label'):
+                self._hp_error_label.config(text="")
+        except Exception:
+            pass
+
+        # BATCH_SIZE
+        try:
+            b = int(self._hp_vars['BATCH_SIZE'].get())
+            if b < 1:
+                raise ValueError('BATCH_SIZE must be >= 1')
+            vals['BATCH_SIZE'] = b
+        except Exception as e:
+            try:
+                self._hp_vars['BATCH_SIZE'].set(str(defaults['BATCH_SIZE']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"BATCH_SIZE: {e}")
+            except Exception:
+                pass
+            return
+
+        # GAMMA
+        try:
+            g = float(self._hp_vars['GAMMA'].get())
+            if not (0.0 <= g <= 1.0):
+                raise ValueError('GAMMA must be in [0,1]')
+            vals['GAMMA'] = g
+        except Exception as e:
+            try:
+                self._hp_vars['GAMMA'].set(str(defaults['GAMMA']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"GAMMA: {e}")
+            except Exception:
+                pass
+            return
+
+        # EPS_START/EPS_END
+        try:
+            es = float(self._hp_vars['EPS_START'].get())
+            ee = float(self._hp_vars['EPS_END'].get())
+            if not (0.0 <= es <= 1.0 and 0.0 <= ee <= 1.0 and es >= ee):
+                raise ValueError('EPS_START/EPS_END must be in [0,1] and EPS_START >= EPS_END')
+            vals['EPS_START'] = es
+            vals['EPS_END'] = ee
+        except Exception as e:
+            try:
+                # reset both to defaults
+                self._hp_vars['EPS_START'].set(str(defaults['EPS_START']))
+                self._hp_vars['EPS_END'].set(str(defaults['EPS_END']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"EPS: {e}")
+            except Exception:
+                pass
+            return
+
+        # EPS_DECAY
+        try:
+            ed = int(self._hp_vars['EPS_DECAY'].get())
+            if ed < 1:
+                raise ValueError('EPS_DECAY must be >= 1')
+            vals['EPS_DECAY'] = ed
+        except Exception as e:
+            try:
+                self._hp_vars['EPS_DECAY'].set(str(defaults['EPS_DECAY']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"EPS_DECAY: {e}")
+            except Exception:
+                pass
+            return
+
+        # TAU
+        try:
+            t = float(self._hp_vars['TAU'].get())
+            if not (0.0 <= t <= 1.0):
+                raise ValueError('TAU must be in [0,1]')
+            vals['TAU'] = t
+        except Exception as e:
+            try:
+                self._hp_vars['TAU'].set(str(defaults['TAU']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"TAU: {e}")
+            except Exception:
+                pass
+            return
+
+        # LR
+        try:
+            lr = float(self._hp_vars['LR'].get())
+            if lr <= 0.0:
+                raise ValueError('LR must be > 0')
+            vals['LR'] = lr
+        except Exception as e:
+            try:
+                self._hp_vars['LR'].set(str(defaults['LR']))
+                if hasattr(self, '_hp_error_label'):
+                    self._hp_error_label.config(text=f"LR: {e}")
+            except Exception:
+                pass
+            return
+
+        # store validated dict to be passed into agent constructors
+        self._agent_hyperparams = vals
+        print(self._agent_hyperparams)
+        try:
+            if hasattr(self, '_hp_error_label'):
+                self._hp_error_label.config(text="")
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo('Hyperparams applied', 'Hyperparameters saved for next agent instantiation')
+        except Exception:
+            pass
 
     def _get_episodes_from_ui(self):
         """Read episode count from UI (custom entry or dropdown). Returns int."""
@@ -1060,6 +1325,109 @@ class App:
                 episodes = 1
 
         return max(1, int(episodes))
+
+    def _reset_hyperparams_ui(self):
+        """Reset hyperparameter entry widgets to defaults from config.py."""
+        defaults = {
+            'BATCH_SIZE': str(self._get_config_value('BATCH_SIZE', '128')),
+            'GAMMA': str(self._get_config_value('GAMMA', '0.99')),
+            'EPS_START': str(self._get_config_value('EPS_START', '0.9')),
+            'EPS_END': str(self._get_config_value('EPS_END', '0.05')),
+            'EPS_DECAY': str(self._get_config_value('EPS_DECAY', '4000')),
+            'TAU': str(self._get_config_value('TAU', '0.005')),
+            'LR': str(self._get_config_value('LR', '3e-4')),            
+        }
+        for k, ent in self._hp_fields.items():
+            try:
+                ent.delete(0, 'end')
+                ent.insert(0, defaults.get(k, ''))
+            except Exception:
+                pass
+        # clear any existing error message
+        try:
+            if hasattr(self, '_hp_error_label'):
+                self._hp_error_label.config(text="")
+        except Exception:
+            pass
+
+    def _get_config_value(self, name: str, fallback: str):
+        """Utility: read a value from the imported config module namespace."""
+        try:
+            from config import __dict__ as _cdict
+        except Exception:
+            _cdict = globals()
+        try:
+            return globals().get(name, fallback)
+        except Exception:
+            return fallback
+
+    def _apply_hyperparams_from_ui(self):
+        """Validate entries and store as `self._agent_hyperparams` dict applied to next agent."""
+        try:
+            vals = {}
+            # BATCH_SIZE: int >=1
+            bs = int(self._hp_fields['BATCH_SIZE'].get())
+            if bs < 1:
+                raise ValueError('BATCH_SIZE must be >= 1')
+            vals['BATCH_SIZE'] = bs
+
+            # GAMMA: float in [0,1]
+            gamma = float(self._hp_fields['GAMMA'].get())
+            if not (0.0 <= gamma <= 1.0):
+                raise ValueError('GAMMA must be in [0,1]')
+            vals['GAMMA'] = gamma
+
+            # EPS_START / EPS_END: floats in [0,1], EPS_START >= EPS_END
+            eps_s = float(self._hp_fields['EPS_START'].get())
+            eps_e = float(self._hp_fields['EPS_END'].get())
+            if not (0.0 <= eps_s <= 1.0 and 0.0 <= eps_e <= 1.0):
+                raise ValueError('EPS_START and EPS_END must be in [0,1]')
+            if eps_s < eps_e:
+                raise ValueError('EPS_START must be >= EPS_END')
+            vals['EPS_START'] = eps_s
+            vals['EPS_END'] = eps_e
+
+            # EPS_DECAY: int >=1
+            ed = int(self._hp_fields['EPS_DECAY'].get())
+            if ed < 1:
+                raise ValueError('EPS_DECAY must be >= 1')
+            vals['EPS_DECAY'] = ed
+
+            # TAU: float in [0,1]
+            tau = float(self._hp_fields['TAU'].get())
+            if not (0.0 <= tau <= 1.0):
+                raise ValueError('TAU must be in [0,1]')
+            vals['TAU'] = tau
+
+            # LR: float > 0
+            lr = float(self._hp_fields['LR'].get())
+            if not (lr > 0.0):
+                raise ValueError('LR must be > 0')
+            vals['LR'] = lr
+
+            # store
+            self._agent_hyperparams = vals
+            self.update_status('Status: Hyperparameters applied for next agent instantiation')
+        except Exception as e:
+            try:
+                messagebox.showerror('Invalid hyperparameter', str(e))
+            except Exception:
+                pass
+
+    def _build_agent_init_kwargs(self, base: dict = None):
+        """Return a dict merged from `base` with the app-level `_agent_hyperparams`.
+
+        - If `base` is None or empty and no app hyperparams exist, returns None.
+        - Does not overwrite an explicit 'hyperparams' key present in `base`.
+        """
+        try:
+            init = dict(base) if isinstance(base, dict) else {}
+            hp = getattr(self, '_agent_hyperparams', None)
+            if hp is not None and 'hyperparams' not in init:
+                init['hyperparams'] = hp
+            return init if init else None
+        except Exception:
+            return base if base else None
 
     def _create_episode_display(self, agent_name: str, difficulty: str, episodes: int):
         """Create an EpisodeProgressDisplay on the Tk main thread and populate static labels.
@@ -1097,6 +1465,18 @@ class App:
             return disp
         except Exception:
             return None
+
+    def _schedule_ep_display_hyperparams(self, ep_display, agent):
+        """If available, schedule transfer of agent hyperparams to the per-run display."""
+        try:
+            if ep_display is not None and agent is not None and hasattr(agent, 'get_config_dict'):
+                cfg = agent.get_config_dict()
+                try:
+                    self.root.after(0, lambda cfg=cfg, d=ep_display: d.set_hyper_params(cfg))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _select_agent(self, key: str, button: tk.Button):
         """Select the agent identified by `key` and highlight the provided button.
@@ -1231,7 +1611,11 @@ class App:
 
         # instantiate agent
         if baseline_instance is not None:
-            agent = AgentClass(env, baseline_instance)
+            try:
+                init_kw = task_kwargs.get('agent_init_kwargs') or init_kwargs or {}
+                agent = AgentClass(env, baseline_instance, **init_kw) if init_kw else AgentClass(env, baseline_instance)
+            except Exception:
+                agent = AgentClass(env, baseline_instance)
         else:
             try:
                 init_kw = task_kwargs.get('agent_init_kwargs') or init_kwargs or {}
@@ -1240,7 +1624,5 @@ class App:
                 agent = AgentClass(env)
 
         return AgentClass, agent, target_module.__name__, target_class_name
-
-    # Global visualization removed; per-run EpisodeProgressDisplay windows are used instead.
-        
+   
 App().run()

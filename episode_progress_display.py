@@ -105,6 +105,29 @@ class EpisodeProgressDisplay:
         self.avg_reward_label = tk.Label(side_frame, text='Avg reward: 0.0')
         self.avg_reward_label.pack(anchor='w', padx=8, pady=2)
 
+        # Hyperparameters panel (read-only labels)
+        tk.Label(side_frame, text='Hyperparameters', font=(None, 12, 'bold')).pack(pady=(8,4))
+        self._hyper_frame = tk.Frame(side_frame)
+        self._hyper_frame.pack(fill='x', padx=6, pady=(0,6))
+
+        # mapping display name -> attribute name on RL agent
+        self._hp_map = [
+            ('Batch size', 'BATCH_SIZE'),
+            ('Gamma', 'GAMMA'),
+            ('Eps start', 'EPS_START'),
+            ('Eps end', 'EPS_END'),
+            ('Eps decay', 'EPS_DECAY'),
+            ('Tau', 'TAU'),
+            ('Lr', 'LR'),
+        ]
+
+        self.hyperparam_labels = {}
+        for i, (disp, _) in enumerate(self._hp_map):
+            tk.Label(self._hyper_frame, text=f'{disp}:').grid(row=i, column=0, sticky='w')
+            val = tk.Label(self._hyper_frame, text='N/A')
+            val.grid(row=i, column=1, sticky='w')
+            self.hyperparam_labels[disp] = val
+
         # keep internal episode counter for x-axis if incoming info lacks 'episode'
         self._next_ep_index = 1
         # run counters
@@ -251,6 +274,58 @@ class EpisodeProgressDisplay:
             self.window.after(0, lambda: _do_set(diff))
         except Exception:
             _do_set(diff)
+
+    def set_hyper_params(self, hyperparams: dict):
+        """Thread-safe setter: read hyperparameters from a dictionary and
+        update the read-only labels in the hyperparameters panel.
+
+        The `hyperparams` dict should use keys matching the attribute names
+        in `self._hp_map` (e.g. 'BATCH_SIZE', 'GAMMA', 'EPS_START', ...).
+        Missing keys or None values display as 'N/A'.
+        """
+        def _format_value(v):
+            try:
+                if isinstance(v, int):
+                    return str(v)
+                if isinstance(v, float):
+                    return f"{v:.6g}"
+                return str(v)
+            except Exception:
+                return 'N/A'
+
+        def _do_set(hp):
+            try:
+                if hp is None:
+                    for disp, _ in self._hp_map:
+                        try:
+                            self.hyperparam_labels[disp].config(text='N/A')
+                        except Exception:
+                            pass
+                    return
+
+                for disp, key in self._hp_map:
+                    try:
+                        val = hp.get(key) if isinstance(hp, dict) else None
+                        text = _format_value(val) if val is not None else 'N/A'
+                        self.hyperparam_labels[disp].config(text=text)
+                    except Exception:
+                        try:
+                            self.hyperparam_labels[disp].config(text='N/A')
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Apply immediately for scripts/tests without a running Tk mainloop,
+        # and also schedule a GUI-thread update for normal thread-safe usage.
+        try:
+            _do_set(hyperparams)
+        except Exception:
+            pass
+        try:
+            self.window.after(0, lambda: _do_set(hyperparams))
+        except Exception:
+            pass
 
     def set_run_progress(self, finished: int, total: int):
         """Thread-safe setter for finished/total episodes display."""

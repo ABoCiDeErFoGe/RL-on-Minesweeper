@@ -60,9 +60,9 @@ class DQN(nn.Module):
         return self.fc2(x)
 
 class RL_agent(agent_interface):
-    def __init__(self, env: MSEnv) -> None:
+    def __init__(self, env: MSEnv, hyperparams: dict = None) -> None:
         self.env = env
-        # store relevant config values from config.py into the agent
+        # store relevant config values from config.py into the agent (defaults)
         self.BATCH_SIZE = BATCH_SIZE
         self.GAMMA = GAMMA
         self.EPS_START = EPS_START
@@ -70,6 +70,17 @@ class RL_agent(agent_interface):
         self.EPS_DECAY = EPS_DECAY
         self.TAU = TAU
         self.LR = LR
+
+        # if hyperparams supplied, override defaults
+        if isinstance(hyperparams, dict):
+            self.BATCH_SIZE = hyperparams.get("BATCH_SIZE", self.BATCH_SIZE)
+            self.GAMMA = hyperparams.get("GAMMA", self.GAMMA)
+            self.EPS_START = hyperparams.get("EPS_START", self.EPS_START)
+            self.EPS_END = hyperparams.get("EPS_END", self.EPS_END)
+            self.EPS_DECAY = hyperparams.get("EPS_DECAY", self.EPS_DECAY)
+            self.TAU = hyperparams.get("TAU", self.TAU)
+            self.LR = hyperparams.get("LR", self.LR)
+
         # a dict view of the config (constructed from agent attributes)
         self.config_dict = self.get_config_dict()
 
@@ -376,8 +387,8 @@ class RL_agent(agent_interface):
         self.optimizer.step()
 
 class DQNAgent(RL_agent):
-    def __init__(self, env: MSEnv) -> None:
-        super().__init__(env)
+    def __init__(self, env: MSEnv, hyperparams: dict = None) -> None:
+        super().__init__(env, hyperparams=hyperparams)
         
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
         """Run one episode using the DQN policy and train during the run.
@@ -480,8 +491,8 @@ class DQNAgent(RL_agent):
         super().load_checkpoint(path, map_location=map_location)
     
 class Hybrid_Agent(RL_agent):
-    def __init__(self, env: MSEnv, baseline_agent) -> None:
-        super().__init__(env)
+    def __init__(self, env: MSEnv, baseline_agent, hyperparams: dict = None) -> None:
+        super().__init__(env, hyperparams=hyperparams)
         self.baseline_agent = baseline_agent
         
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
