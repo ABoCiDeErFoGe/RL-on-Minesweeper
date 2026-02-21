@@ -289,7 +289,10 @@ class MSEnv:
             # award the agent the percentage of cells revealed after action
             prev_unrevealed = sum(cell == -1 for row in prev_state for cell in row)
             after_unrevealed = sum(cell == -1 for row in after_state for cell in row)
-            reward += (prev_unrevealed - after_unrevealed) / (prev_unrevealed + 1e-5)  # avoid div by zero
+            revealed_cells = prev_unrevealed - after_unrevealed
+            # reward is based on the percentage of the board revealed, 
+            # plus a bonus for revealing more cells relative to the previous state
+            reward += revealed_cells/ (self.game.w * self.game.h) + 0.5 * (revealed_cells / (prev_unrevealed + 1e-5))# avoid div by zero
                
         if result == 1:
             print("Game won!")
