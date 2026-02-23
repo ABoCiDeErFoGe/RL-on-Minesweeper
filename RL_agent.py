@@ -72,7 +72,7 @@ class RL_agent(agent_interface):
         self.LR = LR
 
         # if hyperparams supplied, override defaults
-        if isinstance(hyperparams, dict):
+        if hyperparams is not None and isinstance(hyperparams, dict):
             self.BATCH_SIZE = hyperparams.get("BATCH_SIZE", self.BATCH_SIZE)
             self.GAMMA = hyperparams.get("GAMMA", self.GAMMA)
             self.EPS_START = hyperparams.get("EPS_START", self.EPS_START)
@@ -136,7 +136,6 @@ class RL_agent(agent_interface):
             "config": self.get_config_dict(),
             "agent_class": self.__class__.__name__,
         }
-        self._set_meta(checkpoint)
         torch.save(checkpoint, path)
 
     def load_checkpoint(self, path: str, map_location=None) -> None:
@@ -163,9 +162,17 @@ class RL_agent(agent_interface):
                 print("Warning: failed to load optimizer state; continuing")
         self.steps_done = ckpt.get("steps_done", self.steps_done)
         saved_cfg = ckpt.get("config")
-        if saved_cfg is not None and saved_cfg != self.get_config_dict():
-            print("Warning: loaded checkpoint config differs from current agent config")
-        
+        if saved_cfg and isinstance(saved_cfg, dict):
+            self.BATCH_SIZE = saved_cfg.get("BATCH_SIZE", self.BATCH_SIZE)
+            self.GAMMA = saved_cfg.get("GAMMA", self.GAMMA)
+            self.EPS_START = saved_cfg.get("EPS_START", self.EPS_START)
+            self.EPS_END = saved_cfg.get("EPS_END", self.EPS_END)
+            self.EPS_DECAY = saved_cfg.get("EPS_DECAY", self.EPS_DECAY)
+            self.TAU = saved_cfg.get("TAU", self.TAU)
+            self.LR = saved_cfg.get("LR", self.LR)
+            self.env.reset(saved_cfg.get("difficulty", None))
+        else:
+            print("Warning: no config found in checkpoint; using current agent config") 
         # recreate environment with saved difficulty if available
         saved_diff = ckpt.get("difficulty")
         if saved_diff is not None:
