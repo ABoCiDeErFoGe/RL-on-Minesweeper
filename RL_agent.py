@@ -128,6 +128,7 @@ class RL_agent(agent_interface):
     def save_checkpoint(self, path: str) -> None:
         """Save model + optimizer state and agent config to `path`."""
         checkpoint = {
+            "agent_class": self.__class__.__name__,
             "policy_state": self.policy_net.state_dict(),
             "target_state": self.target_net.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
@@ -396,6 +397,7 @@ class RL_agent(agent_interface):
 class DQNAgent(RL_agent):
     def __init__(self, env: MSEnv, hyperparams: dict = None) -> None:
         super().__init__(env, hyperparams=hyperparams)
+        print("RL_agent created")
         
     def run_episode(self, difficulty: str = None, max_steps: int = 5000, delay: float = 0.0):
         """Run one episode using the DQN policy and train during the run.

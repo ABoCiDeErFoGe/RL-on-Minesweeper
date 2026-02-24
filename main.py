@@ -371,63 +371,57 @@ class App:
         self.game.new_game(difficulty)
         return self.game.get_game_state()
 
-    def _run_random_agent(self, difficulty: str = None, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05, episodes: int = 1, agent_name: str = None, **kwargs):
-        """Wrapper that delegates to the generic `_run_agent` adaptor for RandomAgent.
-
-        Kept as a thin shim so existing enqueue code remains unchanged.
-        """
-        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
+    def _create_agent_runner(self, agent_type: str, difficulty: str = None, max_steps: int = None, 
+                            delay: float = 0.0, episodes: int = 1, agent_name: str = None, **kwargs):
+        """Unified agent runner factory for all agent types."""
+        agent_configs = {
+            'random': {
+                'module': 'random_agent',
+                'class': 'RandomAgent',
+                'max_steps': 500,
+                'init_kwargs': {'right_click_prob': kwargs.get('right_click_prob', 0.05)}
+            },
+            'baseline': {
+                'module': 'baseline_agent',
+                'class': 'BaselineAgent',
+                'max_steps': 1000,
+                'init_kwargs': {}
+            },
+            'rl': {
+                'module': 'RL_agent',
+                'class': 'DQNAgent',
+                'max_steps': 100000,
+                'init_kwargs': self._build_agent_init_kwargs(None)
+            },
+            'hybrid': {
+                'module': 'RL_agent',
+                'class': 'Hybrid_Agent',
+                'max_steps': 100000,
+                'init_kwargs': self._build_agent_init_kwargs({
+                    '_baseline': {'module': 'baseline_agent', 'class': 'BaselineAgent', 'kwargs': {}}
+                })
+            }
+        }
+        
+        config = agent_configs.get(agent_type)
+        if not config:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+        
+        run_kwargs = {
+            "difficulty": difficulty,
+            "max_steps": max_steps or config['max_steps'],
+            "delay": delay,
+            "episodes": episodes
+        }
         if agent_name:
-            rw['agent_name'] = agent_name
+            run_kwargs['agent_name'] = agent_name
+            
         return self._run_agent(
-            module_name="random_agent",
-            class_name="RandomAgent",
-            agent_init_kwargs={"right_click_prob": right_click_prob},
-            run_kwargs=rw,
+            module_name=config['module'],
+            class_name=config['class'],
+            agent_init_kwargs=config['init_kwargs'],
+            run_kwargs=run_kwargs
         )
-
-    def _run_baseline_agent(self, difficulty: str = None, max_steps: int = 1000, delay: float = 0.0, episodes: int = 1, agent_name: str = None, **kwargs):
-        """Wrapper that delegates to the generic `_run_agent` adaptor for BaselineAgent."""
-        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
-        if agent_name:
-            rw['agent_name'] = agent_name
-        return self._run_agent(
-            module_name="baseline_agent",
-            class_name="BaselineAgent",
-            agent_init_kwargs={},
-            run_kwargs=rw,
-        )
-
-    def _run_rl_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None, **kwargs):
-        """Run the DQN RL agent for `episodes` and report progress via App.update_agent_visualization.
-
-        This runs on the Playwright worker thread and uses `run_num_episodes`'s
-        `progress_update` callback to stream per-episode info back to the GUI.
-        """
-        # use top-level importlib and Game.MSEnv
-
-        # Delegate to the generic agent runner which handles visualization and progress
-        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
-        if agent_name:
-            rw['agent_name'] = agent_name
-        # build agent init kwargs, merging any app-level hyperparams
-        init_kw = self._build_agent_init_kwargs(None)
-        return self._run_agent(module_name="RL_agent", class_name="DQNAgent", agent_init_kwargs=init_kw, run_kwargs=rw)
-
-    def _run_hybrid_agent(self, difficulty: str = None, max_steps: int = 100000, delay: float = 0.0, episodes: int = 1, agent_name: str = None, **kwargs):
-        """Run the Hybrid_Agent which combines the baseline agent with DQN.
-
-        Instantiates `BaselineAgent` and passes it to `Hybrid_Agent`.
-        """
-        # Delegate to generic runner, passing baseline spec so _run_agent
-        # can create and inject the baseline instance for Hybrid_Agent.
-        rw = {"difficulty": difficulty, "max_steps": max_steps, "delay": delay, "episodes": episodes}
-        if agent_name:
-            rw['agent_name'] = agent_name
-
-        init_kw = {'_baseline': {'module': 'baseline_agent', 'class': 'BaselineAgent', 'kwargs': {}}}
-        init_kw = self._build_agent_init_kwargs(init_kw)
-        return self._run_agent(module_name="RL_agent", class_name="Hybrid_Agent", agent_init_kwargs=init_kw, run_kwargs=rw)
 
     def _run_agent(self, module_name: str, class_name: str, agent_init_kwargs: dict = None, run_kwargs: dict = None):
         """Generic worker-side adaptor to run any agent class.
@@ -561,8 +555,34 @@ class App:
             game = Game(page)
             env = MSEnv(game)
 
+            # Extract agent type from task_kwargs and determine module/class
+            agent_type = task_kwargs.get('agent_type')
+            target_module_name = module_name
+            target_class_name = None
+            
+            if agent_type:
+                # Map agent type to module/class using same logic as _create_agent_runner
+                agent_configs = {
+                    'random': {'module': 'random_agent', 'class': 'RandomAgent'},
+                    'baseline': {'module': 'baseline_agent', 'class': 'BaselineAgent'},
+                    'rl': {'module': 'RL_agent', 'class': 'DQNAgent'},
+                    'hybrid': {'module': 'RL_agent', 'class': 'Hybrid_Agent'}
+                }
+                config = agent_configs.get(agent_type)
+                if config:
+                    target_module_name = config['module']
+                    target_class_name = config['class']
+
             # centralize agent resolution and instantiation
-            AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(env, module_name=module_name, class_name=None, agent_init_kwargs=task_kwargs.get('agent_init_kwargs'), worker_callable=worker_callable, task_kwargs=task_kwargs, agent_name=agent_name)
+            AgentClass, agent, resolved_module, resolved_class = self._instantiate_agent(
+                env, 
+                module_name=target_module_name, 
+                class_name=target_class_name, 
+                agent_init_kwargs=task_kwargs.get('agent_init_kwargs'), 
+                worker_callable=worker_callable, 
+                task_kwargs=task_kwargs, 
+                agent_name=agent_name
+            )
             try:
                 pass
             except Exception:
@@ -644,43 +664,21 @@ class App:
             except Exception:
                 pass
         finally:
-            try:
-                if page is not None:
+            # Cleanup Playwright resources
+            for resource in [('page', page), ('browser', browser), ('playwright', playwright)]:
+                if resource[1]:
                     try:
-                        page.close()
+                        getattr(resource[1], 'close' if resource[0] != 'playwright' else 'stop')()
                     except Exception:
                         pass
-                if browser is not None:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-                if playwright is not None:
-                    try:
-                        playwright.stop()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
     def _click_map_from_history(self, history):
-        """Convert agent `history` into a mapping {(r,c): order} for footers.
-
-        `history` is a list of ((x,y,mode), reward, done) tuples where x,y are
-        1-based coordinates. Returns dict keyed by 0-based (row,col).
-        """
+        """Convert agent history to a mapping {(row,col): order} for footers."""
         click_map = {}
         for idx, entry in enumerate(history, start=1):
-            try:
-                action = entry[0]
-                x, y = action[0], action[1]
-                rr = y - 1
-                cc = x - 1
-                # only keep first occurrence (order)
-                if (rr, cc) not in click_map:
-                    click_map[(rr, cc)] = idx
-            except Exception:
-                continue
+            if len(entry) > 0 and len(entry[0]) >= 2:
+                x, y = entry[0][0], entry[0][1]
+                click_map.setdefault((y - 1, x - 1), idx)  # Convert to 0-based
         return click_map
 
     def _handle_episode_progress(self, agent_name: str, episode_index: int, result, total_episodes: int):
@@ -778,171 +776,174 @@ class App:
             self.update_status(f"Status: {agent_name} failed")
             print(f"{agent_name} error:", result)
             return
-        try:
-            # Support both single-run result dicts and multi-episode aggregates
-            # If run_id provided and registry exists, use stored per-run results for summary
-            run_state = None
-            if run_id is not None:
-                run_state = self._runs.get(run_id)
+        
+        # Get results list
+        run_state = self._runs.get(run_id) if run_id else None
+        if isinstance(result, dict) and 'results' in result:
+            results = result.get('results', [])
+        elif run_state:
+            results = run_state.get('results', [])
+        else:
+            results = [result] if isinstance(result, dict) else []
 
-            if isinstance(result, dict) and 'results' in result:
-                # aggregate across episodes
-                results = result.get('results', [])
-            elif isinstance(run_state, dict):
-                results = run_state.get('results', [])
-            else:
-                results = [result] if isinstance(result, dict) else []
+        # Calculate aggregate stats
+        total_steps = sum(r.get('steps', 0) for r in results if isinstance(r, dict))
+        total_reward = sum(r.get('reward', 0) for r in results if isinstance(r, dict))
+        any_done = any(r.get('done', False) for r in results if isinstance(r, dict))
 
-            total_steps = sum(r.get('steps', 0) for r in results if isinstance(r, dict))
-            total_reward = sum(r.get('reward', 0) for r in results if isinstance(r, dict))
-            any_done = any(r.get('done', False) for r in results if isinstance(r, dict))
-
-            # use last episode's history/state for display
-            last = results[-1] if results else result if isinstance(result, dict) else {}
-            hist = last.get('history', []) if isinstance(last, dict) else []
+        # Render final state from last episode
+        last = results[-1] if results else (result if isinstance(result, dict) else {})
+        if isinstance(last, dict):
+            hist = last.get('history', [])
             click_map = self._click_map_from_history(hist)
             final_state = result.get('final_state') if isinstance(result, dict) else None
-            if final_state is not None:
+            if final_state:
                 self.build_grid(self.grid_container, game_status=final_state, click_history=click_map)
 
-            # update aggregated summary frame
-            self._update_episode_summary_from_results(results)
-            if run_state is not None:
-                # cleanup run registry
-                try:
-                    del self._runs[run_id]
-                except Exception:
-                    pass
+        # Update summary
+        self._update_episode_summary_from_results(results)
+        
+        # Cleanup
+        if run_id and run_id in self._runs:
+            del self._runs[run_id]
 
-            if isinstance(result, dict) and 'results' in result:
-                self.update_status(f"{agent_name} finished ({result.get('episodes',len(results))}): steps={total_steps}, reward={total_reward}, done={any_done}")
-            else:
-                steps = result.get('steps', 0) if isinstance(result, dict) else 0
-                reward = result.get('reward', 0) if isinstance(result, dict) else 0
-                done = result.get('done', False) if isinstance(result, dict) else False
-                self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
-        except Exception:
-            pass
+        # Status message
+        if isinstance(result, dict) and 'results' in result:
+            episodes = result.get('episodes', len(results))
+            self.update_status(f"{agent_name} finished ({episodes}): steps={total_steps}, reward={total_reward}, done={any_done}")
+        else:
+            steps = result.get('steps', 0) if isinstance(result, dict) else 0
+            reward = result.get('reward', 0) if isinstance(result, dict) else 0
+            done = result.get('done', False) if isinstance(result, dict) else False
+            self.update_status(f"{agent_name} finished: steps={steps}, reward={reward}, done={done}")
 
     def _enqueue_agent(self, worker_func, kwargs: dict, agent_name: str):
-        """Put an agent-running task on the Playwright worker and attach common done handler."""
+        """Enqueue an agent task in its own thread with dedicated Playwright instance."""
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
-        # create a per-run registry entry and spawn a thread to enqueue the worker task
-        total_eps = int(kwargs.get('episodes', 1)) if isinstance(kwargs, dict) else 1
-        try:
-            self._run_counter += 1
-            run_id = f"run_{self._run_counter}"
-            self._runs[run_id] = {'agent_name': agent_name, 'total_episodes': total_eps, 'results': []}
-            # clear episode info fields (shared short-summary)
-            try:
-                self._episode_fields['last'].config(text="")
-                self._episode_fields['summary'].config(text="")
-            except Exception:
-                pass
-        except Exception:
-            run_id = None
+        
+        # Create run registry entry
+        self._run_counter += 1
+        run_id = f"run_{self._run_counter}"
+        total_eps = int(kwargs.get('episodes', 1))
+        self._runs[run_id] = {'agent_name': agent_name, 'total_episodes': total_eps, 'results': []}
+        
+        # Clear episode info UI
+        if hasattr(self, '_episode_fields'):
+            self._episode_fields.get('last', tk.Label()).config(text="")
+            self._episode_fields.get('summary', tk.Label()).config(text="")
 
-        # prepare the worker task; include run_id in kwargs so worker-side progress callbacks
-        # can include it in per-episode info objects
-        task_kwargs = dict(kwargs or {})
-        if run_id is not None:
-            task_kwargs['_run_id'] = run_id
+        # Prepare task kwargs
+        task_kwargs = dict(kwargs)
+        task_kwargs['_run_id'] = run_id
+        
+        # Merge hyperparams
+        merged = self._build_agent_init_kwargs(task_kwargs.get('agent_init_kwargs'))
+        if merged:
+            task_kwargs['agent_init_kwargs'] = merged
 
-        # Merge app-level hyperparams into the worker task's agent_init_kwargs
-        try:
-            merged = self._build_agent_init_kwargs(task_kwargs.get('agent_init_kwargs'))
-            if merged is not None:
-                task_kwargs['agent_init_kwargs'] = merged
-        except Exception:
-            pass
-
-        task = {'func': worker_func, 'kwargs': task_kwargs, 'done': (lambda res, name=agent_name, rid=run_id: self._handle_agent_result(name, res, rid)),}
-
-        # Start a dedicated run thread which creates its own Playwright instance
+        # Start dedicated thread
         def _run_thread():
             try:
-                # import and run agent inside its own Playwright/browser/page
-                self._run_agent_with_own_playwright(module_name=worker_func.__name__ if isinstance(worker_func, type) else None,
-                                                     worker_callable=worker_func,
-                                                     task_kwargs=task_kwargs,
-                                                     run_id=run_id,
-                                                     agent_name=agent_name)
-            except Exception:
-                self.update_status(f"Status: Failed to start {agent_name}")
+                self._run_agent_with_own_playwright(
+                    module_name=getattr(worker_func, '__name__', None),
+                    worker_callable=worker_func,
+                    task_kwargs=task_kwargs,
+                    run_id=run_id,
+                    agent_name=agent_name
+                )
+            except Exception as e:
+                self.update_status(f"Status: Failed to start {agent_name}: {e}")
 
-        t = threading.Thread(target=_run_thread, daemon=True)
-        t.start()
+        threading.Thread(target=_run_thread, daemon=True).start()
 
     def start_random_agent(self, max_steps: int = 500, delay: float = 0.02, right_click_prob: float = 0.05):
-        """Enqueue a task to start the random agent on the Playwright thread and display result in the GUI."""
+        """Start random agent."""
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
-
-        # determine difficulty from UI selection and enqueue agent
-        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
-        # determine episodes: custom entry takes precedence
         
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         episodes = self._get_episodes_from_ui()
         
         self._enqueue_agent(
-            self._run_random_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'right_click_prob': right_click_prob, 'episodes': episodes, 'agent_name': 'Random agent'},
-            'Random agent',
+            self._create_agent_runner,
+            {
+                'agent_type': 'random',
+                'difficulty': diff_value,
+                'max_steps': max_steps,
+                'delay': delay,
+                'episodes': episodes,
+                'agent_name': 'Random agent',
+                'right_click_prob': right_click_prob
+            },
+            'Random agent'
         )
 
     def start_baseline_agent(self, max_steps: int = 1000, delay: float = 0.0):
-        """Enqueue a task to start the BaselineAgent on the Playwright thread and display result in the GUI."""
+        """Start baseline agent."""
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
-
-        # determine difficulty from UI selection and enqueue agent
-        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
-        # determine episodes
         
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         episodes = self._get_episodes_from_ui()
         
         self._enqueue_agent(
-            self._run_baseline_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'Baseline agent'},
-            'Baseline agent',
+            self._create_agent_runner,
+            {
+                'agent_type': 'baseline',
+                'difficulty': diff_value,
+                'max_steps': max_steps,
+                'delay': delay,
+                'episodes': episodes,
+                'agent_name': 'Baseline agent'
+            },
+            'Baseline agent'
         )
 
     def start_rl_agent(self, max_steps: int = 100000, delay: float = 0.0):
-        """Enqueue the RL agent training run on the Playwright worker and show visualization."""
+        """Start RL agent."""
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
-
-        # per-run EpisodeProgressDisplay will be created by the runner
-
-        # determine difficulty and episodes (custom entry takes precedence)
+        
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         episodes = self._get_episodes_from_ui()
 
         self._enqueue_agent(
-            self._run_rl_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'RL agent'},
-            'RL agent',
+            self._create_agent_runner,
+            {
+                'agent_type': 'rl',
+                'difficulty': diff_value,
+                'max_steps': max_steps,
+                'delay': delay,
+                'episodes': episodes,
+                'agent_name': 'RL agent'
+            },
+            'RL agent'
         )
 
     def start_hybrid_agent(self, max_steps: int = 100000, delay: float = 0.0):
-        """Enqueue the Hybrid agent (baseline + DQN) to run on the Playwright worker."""
+        """Start hybrid agent."""
         if not hasattr(self, 'game') or self.game is None:
             self.update_status("Status: Game not ready")
             return
-
-        # per-run EpisodeProgressDisplay will be created by the runner
-
+        
         diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
         episodes = self._get_episodes_from_ui()
 
         self._enqueue_agent(
-            self._run_hybrid_agent,
-            {'difficulty': diff_value, 'max_steps': max_steps, 'delay': delay, 'episodes': episodes, 'agent_name': 'Hybrid agent'},
+            self._create_agent_runner,
+            {
+                'agent_type': 'hybrid',
+                'difficulty': diff_value,
+                'max_steps': max_steps,
+                'delay': delay,
+                'episodes': episodes,
+                'agent_name': 'Hybrid agent'
+            },
             'Hybrid agent'
         )
 
@@ -960,22 +961,15 @@ class App:
             if isinstance(result, Exception):
                 self.update_status("Status: Failed to change difficulty")
                 return
-            try:
-                if result is not None:
-                    # debug print of the returned game_status for troubleshooting
-                    try:
-                        rows = len(result)
-                        cols = len(result[0]) if rows > 0 else 0
-                    except Exception:
-                        rows = cols = 0
-                    print(f"DEBUG: game_status ({rows}x{cols}): ")
-                    print(result)
-                    self.build_grid(self.grid_container, game_status=result)
-                    self.update_status(f"Status: Difficulty set to {label}")
-            except Exception:
-                pass
+            if result is not None:
+                self.build_grid(self.grid_container, game_status=result)
+                self.update_status(f"Status: Difficulty set to {label}")
 
-        task = {'func': self._do_new_game, 'args': (diff_value,), 'done': _done}
+        task = {
+            'func': lambda d: self.game.new_game(d) or self.game.get_game_state(),
+            'args': (diff_value,),
+            'done': _done
+        }
         self._playwright_tasks.put(task)
 
     def initialize_interface(self):
@@ -1148,165 +1142,81 @@ class App:
         except Exception:
             pass
 
+    def _get_hyperparam_defaults(self):
+        """Return default hyperparameter values from config."""
+        return {
+            'BATCH_SIZE': BATCH_SIZE,
+            'GAMMA': GAMMA,
+            'EPS_START': EPS_START,
+            'EPS_END': EPS_END,
+            'EPS_DECAY': EPS_DECAY,
+            'TAU': TAU,
+            'LR': LR,
+        }
+    
     def _reset_hyperparams(self):
-        # reset UI entries to defaults from config
-        defaults = {
-            'BATCH_SIZE': BATCH_SIZE,
-            'GAMMA': GAMMA,
-            'EPS_START': EPS_START,
-            'EPS_END': EPS_END,
-            'EPS_DECAY': EPS_DECAY,
-            'TAU': TAU,
-            'LR': LR,
-        }
+        """Reset UI entries to defaults from config."""
+        defaults = self._get_hyperparam_defaults()
         for k, v in defaults.items():
-            try:
+            if k in self._hp_vars:
                 self._hp_vars[k].set(str(v))
-            except Exception:
-                pass
-        # clear any existing error message
-        try:
-            if hasattr(self, '_hp_error_label'):
-                self._hp_error_label.config(text="")
-        except Exception:
-            pass
+        if hasattr(self, '_hp_error_label'):
+            self._hp_error_label.config(text="")
 
+    def _validate_hyperparam(self, name, validator, defaults):
+        """Validate a single hyperparameter and return its value or None on error."""
+        try:
+            value = validator(self._hp_vars[name].get())
+            return value
+        except Exception as e:
+            self._hp_vars[name].set(str(defaults[name]))
+            if hasattr(self, '_hp_error_label'):
+                self._hp_error_label.config(text=f"{name}: {e}")
+            return None
+    
     def _apply_hyperparams(self):
-        """Validate hyperparameter entries and store them for next agent instantiation.
-
-        Validation rules enforced:
-        - BATCH_SIZE: int >= 1
-        - GAMMA: float in [0,1]
-        - EPS_START/EPS_END: floats in [0,1] with EPS_START >= EPS_END
-        - EPS_DECAY: int >= 1
-        - TAU: float in [0,1]
-        - LR: float > 0
-        """
-        # Validate each field individually so we can reset the invalid one
+        """Validate hyperparameter entries and store them for next agent instantiation."""
+        defaults = self._get_hyperparam_defaults()
         vals = {}
-        defaults = {
-            'BATCH_SIZE': BATCH_SIZE,
-            'GAMMA': GAMMA,
-            'EPS_START': EPS_START,
-            'EPS_END': EPS_END,
-            'EPS_DECAY': EPS_DECAY,
-            'TAU': TAU,
-            'LR': LR,
+        
+        if hasattr(self, '_hp_error_label'):
+            self._hp_error_label.config(text="")
+        
+        # Define validators
+        validators = {
+            'BATCH_SIZE': lambda x: int(x) if int(x) >= 1 else (_ for _ in ()).throw(ValueError('must be >= 1')),
+            'GAMMA': lambda x: float(x) if 0.0 <= float(x) <= 1.0 else (_ for _ in ()).throw(ValueError('must be in [0,1]')),
+            'EPS_DECAY': lambda x: int(x) if int(x) >= 1 else (_ for _ in ()).throw(ValueError('must be >= 1')),
+            'TAU': lambda x: float(x) if 0.0 <= float(x) <= 1.0 else (_ for _ in ()).throw(ValueError('must be in [0,1]')),
+            'LR': lambda x: float(x) if float(x) > 0.0 else (_ for _ in ()).throw(ValueError('must be > 0')),
         }
-
-        # clear previous error
-        try:
-            if hasattr(self, '_hp_error_label'):
-                self._hp_error_label.config(text="")
-        except Exception:
-            pass
-
-        # BATCH_SIZE
-        try:
-            b = int(self._hp_vars['BATCH_SIZE'].get())
-            if b < 1:
-                raise ValueError('BATCH_SIZE must be >= 1')
-            vals['BATCH_SIZE'] = b
-        except Exception as e:
-            try:
-                self._hp_vars['BATCH_SIZE'].set(str(defaults['BATCH_SIZE']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"BATCH_SIZE: {e}")
-            except Exception:
-                pass
-            return
-
-        # GAMMA
-        try:
-            g = float(self._hp_vars['GAMMA'].get())
-            if not (0.0 <= g <= 1.0):
-                raise ValueError('GAMMA must be in [0,1]')
-            vals['GAMMA'] = g
-        except Exception as e:
-            try:
-                self._hp_vars['GAMMA'].set(str(defaults['GAMMA']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"GAMMA: {e}")
-            except Exception:
-                pass
-            return
-
-        # EPS_START/EPS_END
+        
+        # Validate single params
+        for name, validator in validators.items():
+            value = self._validate_hyperparam(name, validator, defaults)
+            if value is None:
+                return
+            vals[name] = value
+        
+        # Validate EPS_START/EPS_END together
         try:
             es = float(self._hp_vars['EPS_START'].get())
             ee = float(self._hp_vars['EPS_END'].get())
             if not (0.0 <= es <= 1.0 and 0.0 <= ee <= 1.0 and es >= ee):
-                raise ValueError('EPS_START/EPS_END must be in [0,1] and EPS_START >= EPS_END')
+                raise ValueError('must be in [0,1] and EPS_START >= EPS_END')
             vals['EPS_START'] = es
             vals['EPS_END'] = ee
         except Exception as e:
-            try:
-                # reset both to defaults
-                self._hp_vars['EPS_START'].set(str(defaults['EPS_START']))
-                self._hp_vars['EPS_END'].set(str(defaults['EPS_END']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"EPS: {e}")
-            except Exception:
-                pass
-            return
-
-        # EPS_DECAY
-        try:
-            ed = int(self._hp_vars['EPS_DECAY'].get())
-            if ed < 1:
-                raise ValueError('EPS_DECAY must be >= 1')
-            vals['EPS_DECAY'] = ed
-        except Exception as e:
-            try:
-                self._hp_vars['EPS_DECAY'].set(str(defaults['EPS_DECAY']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"EPS_DECAY: {e}")
-            except Exception:
-                pass
-            return
-
-        # TAU
-        try:
-            t = float(self._hp_vars['TAU'].get())
-            if not (0.0 <= t <= 1.0):
-                raise ValueError('TAU must be in [0,1]')
-            vals['TAU'] = t
-        except Exception as e:
-            try:
-                self._hp_vars['TAU'].set(str(defaults['TAU']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"TAU: {e}")
-            except Exception:
-                pass
-            return
-
-        # LR
-        try:
-            lr = float(self._hp_vars['LR'].get())
-            if lr <= 0.0:
-                raise ValueError('LR must be > 0')
-            vals['LR'] = lr
-        except Exception as e:
-            try:
-                self._hp_vars['LR'].set(str(defaults['LR']))
-                if hasattr(self, '_hp_error_label'):
-                    self._hp_error_label.config(text=f"LR: {e}")
-            except Exception:
-                pass
-            return
-
-        # store validated dict to be passed into agent constructors
-        self._agent_hyperparams = vals
-        print(self._agent_hyperparams)
-        try:
+            self._hp_vars['EPS_START'].set(str(defaults['EPS_START']))
+            self._hp_vars['EPS_END'].set(str(defaults['EPS_END']))
             if hasattr(self, '_hp_error_label'):
-                self._hp_error_label.config(text="")
-        except Exception:
-            pass
-        try:
-            messagebox.showinfo('Hyperparams applied', 'Hyperparameters saved for next agent instantiation')
-        except Exception:
-            pass
+                self._hp_error_label.config(text=f"EPS: {e}")
+            return
+        
+        self._agent_hyperparams = vals
+        if hasattr(self, '_hp_error_label'):
+            self._hp_error_label.config(text="")
+        messagebox.showinfo('Hyperparams applied', 'Hyperparameters saved for next agent instantiation')
 
     def _get_episodes_from_ui(self):
         """Read episode count from UI (custom entry or dropdown). Returns int."""
@@ -1415,19 +1325,12 @@ class App:
                 pass
 
     def _build_agent_init_kwargs(self, base: dict = None):
-        """Return a dict merged from `base` with the app-level `_agent_hyperparams`.
-
-        - If `base` is None or empty and no app hyperparams exist, returns None.
-        - Does not overwrite an explicit 'hyperparams' key present in `base`.
-        """
-        try:
-            init = dict(base) if isinstance(base, dict) else {}
-            hp = getattr(self, '_agent_hyperparams', None)
-            if hp is not None and 'hyperparams' not in init:
-                init['hyperparams'] = hp
-            return init if init else None
-        except Exception:
-            return base if base else None
+        """Merge base kwargs with app-level hyperparams."""
+        init = dict(base) if isinstance(base, dict) else {}
+        hp = getattr(self, '_agent_hyperparams', None)
+        if hp and 'hyperparams' not in init:
+            init['hyperparams'] = hp
+        return init if init else None
 
     def _create_episode_display(self, agent_name: str, difficulty: str, episodes: int):
         """Create an EpisodeProgressDisplay on the Tk main thread and populate static labels.
@@ -1535,93 +1438,80 @@ class App:
                 pass
 
     def _instantiate_agent(self, env, module_name: str = None, class_name: str = None, agent_init_kwargs: dict = None, worker_callable=None, task_kwargs: dict = None, agent_name: str = None):
-        """Resolve and instantiate an agent class given various hints.
-
-        Returns a tuple (AgentClass, agent_instance, resolved_module_name, resolved_class_name).
+        """Resolve and instantiate an agent class.
+        
+        Returns: (AgentClass, agent_instance, module_name, class_name)
         """
-        task_kwargs = dict(task_kwargs or {})
-        # determine target module/class
-        target_module = None
-        target_class_name = class_name
-
-        if module_name and module_name in ('RL_agent', 'baseline_agent', 'random_agent'):
+        # Agent registry for clean lookups
+        AGENT_MAP = {
+            'RL_agent': {'default': 'DQNAgent', 'hybrid_keyword': 'Hybrid_Agent'},
+            'baseline_agent': {'default': 'BaselineAgent'},
+            'random_agent': {'default': 'RandomAgent'}
+        }
+        
+        task_kwargs = task_kwargs or {}
+        
+        # Determine target module and class
+        if module_name and module_name in AGENT_MAP:
             target_module = importlib.import_module(module_name)
-            if module_name == 'RL_agent':
-                # prefer Hybrid if agent_name or task hints include it
-                if (agent_name and 'hybrid' in agent_name.lower()) or ('hybrid' in (task_kwargs.get('agent_name') or '').lower()):
-                    target_class_name = 'Hybrid_Agent'
-                else:
-                    target_class_name = target_class_name or 'DQNAgent'
-            elif module_name == 'baseline_agent':
-                target_class_name = target_class_name or 'BaselineAgent'
-            elif module_name == 'random_agent':
-                target_class_name = target_class_name or 'RandomAgent'
-
-        # fallback to worker_callable name mapping
-        if target_module is None and worker_callable is not None:
-            name = getattr(worker_callable, '__name__', '') or ''
-            nlow = name.lower()
-            if 'hybrid' in nlow:
+            config = AGENT_MAP[module_name]
+            
+            # Check for hybrid keyword in agent_name
+            if 'hybrid_keyword' in config and agent_name and 'hybrid' in agent_name.lower():
+                target_class_name = config['hybrid_keyword']
+            else:
+                target_class_name = class_name or config['default']
+        
+        # Fallback: parse worker_callable name
+        elif worker_callable:
+            name_lower = getattr(worker_callable, '__name__', '').lower()
+            if 'hybrid' in name_lower:
                 target_module = importlib.import_module('RL_agent')
                 target_class_name = 'Hybrid_Agent'
-            elif 'rl' in nlow:
+            elif 'rl' in name_lower:
                 target_module = importlib.import_module('RL_agent')
                 target_class_name = 'DQNAgent'
-            elif 'baseline' in nlow:
+            elif 'baseline' in name_lower:
                 target_module = importlib.import_module('baseline_agent')
                 target_class_name = 'BaselineAgent'
-            elif 'random' in nlow:
+            elif 'random' in name_lower:
                 target_module = importlib.import_module('random_agent')
                 target_class_name = 'RandomAgent'
-
-        # last resort
-        if target_module is None:
+            else:
+                target_module = importlib.import_module('RL_agent')
+                target_class_name = 'DQNAgent'
+        
+        # Last resort default
+        else:
             target_module = importlib.import_module('RL_agent')
-            target_class_name = target_class_name or 'DQNAgent'
+            target_class_name = class_name or 'DQNAgent'
 
         AgentClass = getattr(target_module, target_class_name)
-
-        # baseline handling
-        init_kwargs = dict(agent_init_kwargs) if isinstance(agent_init_kwargs, dict) else {}
+        
+        # Handle baseline injection for Hybrid_Agent
+        init_kwargs = dict(agent_init_kwargs) if agent_init_kwargs else {}
         baseline_instance = None
+        
         if '_baseline' in init_kwargs:
             bspec = init_kwargs.pop('_baseline')
             if isinstance(bspec, dict):
-                try:
-                    bm = importlib.import_module(bspec.get('module'))
-                    BClass = getattr(bm, bspec.get('class'))
-                    bkwargs = bspec.get('kwargs', {}) or {}
-                    baseline_instance = BClass(env, **bkwargs) if bkwargs else BClass(env)
-                except Exception:
-                    baseline_instance = None
+                bm = importlib.import_module(bspec['module'])
+                BClass = getattr(bm, bspec['class'])
+                baseline_instance = BClass(env, **bspec.get('kwargs', {}))
             else:
                 baseline_instance = bspec
-
-        # if class needs baseline and none provided, try to instantiate default
-        try:
-            if baseline_instance is None and target_class_name == 'Hybrid_Agent':
-                try:
-                    bm = importlib.import_module('baseline_agent')
-                    BClass = getattr(bm, 'BaselineAgent')
-                    baseline_instance = BClass(env)
-                except Exception:
-                    baseline_instance = None
-        except Exception:
-            baseline_instance = None
-
-        # instantiate agent
-        if baseline_instance is not None:
-            try:
-                init_kw = task_kwargs.get('agent_init_kwargs') or init_kwargs or {}
-                agent = AgentClass(env, baseline_instance, **init_kw) if init_kw else AgentClass(env, baseline_instance)
-            except Exception:
-                agent = AgentClass(env, baseline_instance)
+        
+        # Auto-create baseline for Hybrid_Agent if not provided
+        if baseline_instance is None and target_class_name == 'Hybrid_Agent':
+            bm = importlib.import_module('baseline_agent')
+            baseline_instance = getattr(bm, 'BaselineAgent')(env)
+        
+        # Instantiate agent
+        merged_kwargs = task_kwargs.get('agent_init_kwargs', init_kwargs)
+        if baseline_instance:
+            agent = AgentClass(env, baseline_instance, **merged_kwargs) if merged_kwargs else AgentClass(env, baseline_instance)
         else:
-            try:
-                init_kw = task_kwargs.get('agent_init_kwargs') or init_kwargs or {}
-                agent = AgentClass(env, **init_kw) if init_kw else AgentClass(env)
-            except Exception:
-                agent = AgentClass(env)
+            agent = AgentClass(env, **merged_kwargs) if merged_kwargs else AgentClass(env)
 
         return AgentClass, agent, target_module.__name__, target_class_name
    
