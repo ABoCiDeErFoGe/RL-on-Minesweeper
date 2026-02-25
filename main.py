@@ -14,7 +14,7 @@ then render the final state plus a click-order footer for analysis.
 import threading
 import queue
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from playwright.sync_api import sync_playwright
 from Game import Game
 import importlib
@@ -947,6 +947,162 @@ class App:
             'Hybrid agent'
         )
 
+    def _load_agent_checkpoint(self):
+        """Open file dialog to select and load a checkpoint file."""
+        import torch
+        import os
+        
+        try:
+            # Open file dialog in current working directory
+            filepath = filedialog.askopenfilename(
+                title="Select checkpoint file",
+                filetypes=[("PyTorch files", "*.pth"), ("All files", "*.*")],
+                initialdir=os.getcwd()
+            )
+            
+            if not filepath:
+                return  # User cancelled
+            
+            # Load checkpoint to verify it's valid and extract info
+            checkpoint = torch.load(filepath, map_location='cpu')
+            
+            # Verify required keys exist
+            if 'agent_class' not in checkpoint:
+                messagebox.showerror("Invalid Checkpoint", "Checkpoint missing 'agent_class' field")
+                return
+            
+            # Store checkpoint info
+            self._loaded_checkpoint_path = filepath
+            self._loaded_agent_class = checkpoint.get('agent_class')
+            self._checkpoint_loaded = True
+            
+            # Enable the Saved Agent button
+            if hasattr(self, '_saved_agent_btn'):
+                self._saved_agent_btn.config(state='normal')
+            
+            # Display notification with filename
+            filename = os.path.basename(filepath)
+            self._checkpoint_label.config(text=f"Loaded:\n{filename}", fg='green')
+            self.update_status(f"Status: Checkpoint loaded ({self._loaded_agent_class})")
+            
+        except Exception as e:
+            messagebox.showerror("Error Loading Checkpoint", f"Failed to load checkpoint: {str(e)}")
+            self._checkpoint_label.config(text="", fg='red')
+
+    def _apply_checkpoint_settings(self):
+        """Apply checkpoint settings (difficulty and hyperparameters) to the UI."""
+        import torch
+        
+        if not self._checkpoint_loaded or not self._loaded_checkpoint_path:
+            return
+        
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(self._loaded_checkpoint_path, map_location='cpu')
+            
+            # Extract settings from checkpoint
+            saved_difficulty = checkpoint.get('difficulty', 'beginner')
+            saved_config = checkpoint.get('config', {})
+            
+            # Update difficulty selector
+            try:
+                # Find the key that matches the saved difficulty
+                for label, value in self._diff_map.items():
+                    if value == saved_difficulty:
+                        self._diff_var.set(label)
+                        break
+            except Exception:
+                pass
+            
+            # Update hyperparameters from checkpoint config
+            try:
+                for param_name, param_value in saved_config.items():
+                    if param_name in self._hp_vars:
+                        self._hp_vars[param_name].set(str(param_value))
+            except Exception:
+                pass
+            
+            # Update status
+            agent_class_name = checkpoint.get('agent_class', 'Unknown')
+            self.update_status(f"Status: Loaded {agent_class_name} settings (difficulty: {saved_difficulty})")
+            
+        except Exception as e:
+            pass
+
+    def _run_saved_agent(self):
+        """Load saved agent checkpoint and run it with checkpoint settings."""
+        import torch
+        from Game import MSEnv
+        
+        if not self._checkpoint_loaded or not self._loaded_checkpoint_path:
+            messagebox.showwarning("No Checkpoint Loaded", "Please load a checkpoint first")
+            return
+        
+        try:
+            # Load checkpoint
+            checkpoint = torch.load(self._loaded_checkpoint_path, map_location='cpu')
+            
+            # Extract settings from checkpoint
+            saved_difficulty = checkpoint.get('difficulty', 'beginner')
+            saved_config = checkpoint.get('config', {})
+            agent_class_name = checkpoint.get('agent_class')
+            
+            # Update difficulty selector and disable it
+            try:
+                # Find the key that matches the saved difficulty
+                for label, value in self._diff_map.items():
+                    if value == saved_difficulty:
+                        self._diff_var.set(label)
+                        break
+                # Disable difficulty selector since checkpoint specifies it
+                self._diff_menu.config(state='disabled')
+            except Exception:
+                pass
+            
+            # Update hyperparameters from checkpoint config
+            try:
+                for param_name, param_value in saved_config.items():
+                    if param_name in self._hp_vars:
+                        self._hp_vars[param_name].set(str(param_value))
+            except Exception:
+                pass
+            
+            # Select the appropriate agent type based on agent_class
+            agent_type_map = {
+                'DQNAgent': 'rl',
+                'Hybrid_Agent': 'hybrid',
+                'BaselineAgent': 'baseline',
+                'RandomAgent': 'random'
+            }
+            
+            agent_type = agent_type_map.get(agent_class_name, 'rl')
+            
+            # Select and run the agent with the checkpoint path
+            if not hasattr(self, 'game') or self.game is None:
+                self.update_status("Status: Game not ready")
+                return
+            
+            # Get episodes from UI
+            episodes = self._get_episodes_from_ui()
+            
+            # Prepare run parameters with checkpoint path
+            diff_value = saved_difficulty
+            task_kwargs = {
+                'agent_type': agent_type,
+                'difficulty': diff_value,
+                'max_steps': 100000,
+                'delay': 0.0,
+                'episodes': episodes,
+                'agent_name': f'Saved {agent_type.capitalize()} Agent',
+                'checkpoint_path': self._loaded_checkpoint_path  # Pass checkpoint to agent
+            }
+            
+            # Would run the agent here, but user said no need to implement this yet
+            self.update_status(f"Status: Ready to run saved {agent_class_name}")
+            
+        except Exception as e:
+            messagebox.showerror("Error Running Saved Agent", f"Failed to run saved agent: {str(e)}")
+
     def _on_difficulty_selected(self, label: str):
         """GUI callback when a difficulty is chosen from the dropdown.
 
@@ -1009,11 +1165,14 @@ class App:
         # Agent selection buttons (2x2 grid) and Start control
         self._agent_buttons = {}
         self.selected_agent = None
+        
+        # Checkpoint tracking variables
+        self._loaded_checkpoint_path = None
+        self._checkpoint_loaded = False
+        self._loaded_agent_class = None
 
         agent_frame = tk.Frame(self.sidebar)
         agent_frame.pack(fill='x', pady=(4,6))
-
-        # first row
         btn = tk.Button(agent_frame, text="Random", width=12)
         btn.config(command=lambda k='random', b=btn: self._select_agent(k, b))
         btn.grid(row=0, column=0, padx=4, pady=2)
@@ -1035,6 +1194,21 @@ class App:
         btn.grid(row=1, column=1, padx=4, pady=2)
         self._agent_buttons['hybrid'] = btn
 
+        # third row - checkpoint buttons
+        btn = tk.Button(agent_frame, text="Load Agent", width=12, command=self._load_agent_checkpoint)
+        btn.grid(row=2, column=0, padx=4, pady=2)
+        self._load_agent_btn = btn
+        
+        btn = tk.Button(agent_frame, text="Saved Agent", width=12)
+        btn.config(command=lambda k='saved', b=btn: self._select_agent(k, b), state='disabled')
+        btn.grid(row=2, column=1, padx=4, pady=2)
+        self._agent_buttons['saved'] = btn
+        self._saved_agent_btn = btn
+
+        # Checkpoint notification label (placed below checkpoint buttons)
+        self._checkpoint_label = tk.Label(agent_frame, text="", fg='green', font=(None, 8), wraplength=100)
+        self._checkpoint_label.grid(row=3, column=0, columnspan=2, padx=4, pady=(2, 4))
+
         # Difficulty selector (placed below agent selection)
         diff_frame = tk.Frame(self.sidebar)
         diff_frame.pack(fill="x", pady=(0,6))
@@ -1043,8 +1217,8 @@ class App:
         self._diff_map = {"Beginner": "beginner", "Intermediate": "intermediate", "Expert": "expert"}
         self._diff_var = tk.StringVar(value="Beginner")
         options = list(self._diff_map.keys())
-        diff_menu = tk.OptionMenu(diff_frame, self._diff_var, *options, command=self._on_difficulty_selected)
-        diff_menu.pack(side="right")
+        self._diff_menu = tk.OptionMenu(diff_frame, self._diff_var, *options, command=self._on_difficulty_selected)
+        self._diff_menu.pack(side="right")
 
         # Start button (below difficulty)
         start_btn = tk.Button(self.sidebar, text="Start", command=self.start_selected_agent)
@@ -1401,9 +1575,34 @@ class App:
                 pass
             # store selection
             self.selected_agent = key
+            
+            # If saved agent is selected, load checkpoint settings
+            if key == 'saved':
+                try:
+                    self._apply_checkpoint_settings()
+                except Exception as e:
+                    pass
+            
+            # Enable difficulty selector when non-saved agent is selected
+            # Disable it when saved agent is selected (checkpoint determines difficulty)
+            try:
+                if hasattr(self, '_diff_menu'):
+                    if key == 'saved':
+                        self._diff_menu.config(state='disabled')
+                    else:
+                        self._diff_menu.config(state='normal')
+            except Exception:
+                pass
+            
             # update status bar
             try:
-                pretty = {'random': 'Random agent', 'baseline': 'Baseline agent', 'rl': 'RL agent', 'hybrid': 'Hybrid agent'}.get(key, str(key))
+                pretty = {
+                    'random': 'Random agent', 
+                    'baseline': 'Baseline agent', 
+                    'rl': 'RL agent', 
+                    'hybrid': 'Hybrid agent',
+                    'saved': 'Saved agent'
+                }.get(key, str(key))
                 self.update_status(f"Selected: {pretty}")
             except Exception:
                 pass
