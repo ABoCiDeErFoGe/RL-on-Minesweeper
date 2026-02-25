@@ -555,6 +555,19 @@ class App:
             game = Game(page)
             env = MSEnv(game)
 
+            # If loading from checkpoint, initialize game with checkpoint's difficulty first
+            # This ensures the network dimensions match the checkpoint
+            checkpoint_path = task_kwargs.get('checkpoint_path')
+            if checkpoint_path:
+                try:
+                    import torch
+                    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                    saved_difficulty = checkpoint.get('difficulty', 'beginner')
+                    # Initialize game with correct difficulty before creating agent
+                    game.new_game(saved_difficulty)
+                except Exception as e:
+                    print(f"Warning: Failed to pre-initialize game from checkpoint difficulty: {e}")
+
             # Extract agent type from task_kwargs and determine module/class
             agent_type = task_kwargs.get('agent_type')
             target_module_name = module_name
@@ -945,6 +958,45 @@ class App:
                 'agent_name': 'Hybrid agent'
             },
             'Hybrid agent'
+        )
+
+    def start_saved_agent(self):
+        """Start a previously saved agent from checkpoint."""
+        if not self._checkpoint_loaded or not self._loaded_checkpoint_path:
+            messagebox.showwarning("No Checkpoint", "Please load a checkpoint first")
+            return
+        
+        if not hasattr(self, 'game') or self.game is None:
+            self.update_status("Status: Game not ready")
+            return
+        
+        episodes = self._get_episodes_from_ui()
+        
+        # Get difficulty from checkpoint (already set in UI)
+        diff_value = self._diff_map.get(self._diff_var.get(), "beginner")
+        
+        # Get agent type from loaded checkpoint
+        agent_type_map = {
+            'DQNAgent': 'rl',
+            'Hybrid_Agent': 'hybrid',
+            'BaselineAgent': 'baseline',
+            'RandomAgent': 'random'
+        }
+        agent_type = agent_type_map.get(self._loaded_agent_class, 'rl')
+        
+        # Queue the agent with checkpoint path (ONLY for saved agent)
+        self._enqueue_agent(
+            self._create_agent_runner,
+            {
+                'agent_type': agent_type,
+                'difficulty': diff_value,
+                'max_steps': 100000,
+                'delay': 0.0,
+                'episodes': episodes,
+                'agent_name': f'Saved {agent_type.capitalize()} Agent',
+                'checkpoint_path': self._loaded_checkpoint_path  # Only passed for saved agent
+            },
+            f'Saved {agent_type.capitalize()} Agent'
         )
 
     def _load_agent_checkpoint(self):
@@ -1546,14 +1598,45 @@ class App:
     def _schedule_ep_display_hyperparams(self, ep_display, agent):
         """If available, schedule transfer of agent hyperparams to the per-run display."""
         try:
-            if ep_display is not None and agent is not None and hasattr(agent, 'get_config_dict'):
-                cfg = agent.get_config_dict()
+            if ep_display is None or agent is None:
+                return
+            
+            # Get hyperparams from the agent
+            cfg = None
+            if hasattr(agent, 'get_config_dict'):
                 try:
-                    self.root.after(0, lambda cfg=cfg, d=ep_display: d.set_hyper_params(cfg))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    cfg = agent.get_config_dict()
+                except Exception as e:
+                    print(f"Warning: Failed to get config dict from agent: {e}")
+                    return
+            
+            # Fallback: try reading attributes directly from agent
+            if cfg is None and hasattr(agent, 'BATCH_SIZE'):
+                try:
+                    cfg = {
+                        'BATCH_SIZE': getattr(agent, 'BATCH_SIZE', None),
+                        'GAMMA': getattr(agent, 'GAMMA', None),
+                        'EPS_START': getattr(agent, 'EPS_START', None),
+                        'EPS_END': getattr(agent, 'EPS_END', None),
+                        'EPS_DECAY': getattr(agent, 'EPS_DECAY', None),
+                        'TAU': getattr(agent, 'TAU', None),
+                        'LR': getattr(agent, 'LR', None),
+                    }
+                except Exception as e:
+                    print(f"Warning: Failed to read hyperparams from agent attributes: {e}")
+            
+            if cfg:
+                try:
+                    self.root.after(0, lambda c=cfg, d=ep_display: d.set_hyper_params(c))
+                except Exception as e:
+                    print(f"Warning: Failed to schedule hyperparam update: {e}")
+                    # Try direct call as fallback
+                    try:
+                        ep_display.set_hyper_params(cfg)
+                    except Exception as e2:
+                        print(f"Warning: Direct hyperparam update also failed: {e2}")
+        except Exception as e:
+            print(f"Warning: _schedule_ep_display_hyperparams failed: {e}")
 
     def _select_agent(self, key: str, button: tk.Button):
         """Select the agent identified by `key` and highlight the provided button.
@@ -1623,6 +1706,7 @@ class App:
             'baseline': self.start_baseline_agent,
             'rl': self.start_rl_agent,
             'hybrid': self.start_hybrid_agent,
+            'saved': self.start_saved_agent,
         }
         fn = mapping.get(key)
         if fn is None:
@@ -1711,6 +1795,19 @@ class App:
             agent = AgentClass(env, baseline_instance, **merged_kwargs) if merged_kwargs else AgentClass(env, baseline_instance)
         else:
             agent = AgentClass(env, **merged_kwargs) if merged_kwargs else AgentClass(env)
+
+        # Load checkpoint if provided (ONLY for saved agent path)
+        checkpoint_path = task_kwargs.get('checkpoint_path')
+        if checkpoint_path:
+            try:
+                # RL agents (DQNAgent, Hybrid_Agent) have load_checkpoint method
+                if hasattr(agent, 'load_checkpoint'):
+                    agent.load_checkpoint(checkpoint_path)
+                else:
+                    # For non-RL agents (Random, Baseline), checkpoint loading is not applicable
+                    pass
+            except Exception as e:
+                print(f"Warning: Failed to load checkpoint: {e}")
 
         return AgentClass, agent, target_module.__name__, target_class_name
    
