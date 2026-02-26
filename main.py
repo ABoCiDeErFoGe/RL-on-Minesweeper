@@ -1037,6 +1037,13 @@ class App:
             self._checkpoint_label.config(text=f"Loaded:\n{filename}", fg='green')
             self.update_status(f"Status: Checkpoint loaded ({self._loaded_agent_class})")
             
+            # If Saved Agent is currently selected, apply the new checkpoint settings immediately
+            if getattr(self, 'selected_agent', None) == 'saved':
+                try:
+                    self._apply_checkpoint_settings()
+                except Exception:
+                    pass
+            
         except Exception as e:
             messagebox.showerror("Error Loading Checkpoint", f"Failed to load checkpoint: {str(e)}")
             self._checkpoint_label.config(text="", fg='red')
