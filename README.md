@@ -43,6 +43,8 @@ The training and optimization process is largely inspired by https://docs.pytorc
 Currently the application only supports tweaking batch size, gamma, epsilon, target network update rate (TAU), and the learning rate. Other hyperparameters such as number of layers as well as the reward function, should also be made avaliable to the user to provide a more accessibility to the user. 
 
 When the application is loading, it lacks a clear indication, sometimes results in the application being unresponsive. A simple loading animation would helps a lot.
+
+The testing is still incompleted yet, will do it in a bit.
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first
 to discuss what you would like to change.
