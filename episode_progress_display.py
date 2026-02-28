@@ -105,6 +105,10 @@ class EpisodeProgressDisplay:
         self.avg_reward_label = tk.Label(side_frame, text='Avg reward: 0.0')
         self.avg_reward_label.pack(anchor='w', padx=8, pady=2)
 
+        # Save status label
+        self.save_status_label = tk.Label(side_frame, text='Save status: —', fg='gray', wraplength=160)
+        self.save_status_label.pack(anchor='w', padx=8, pady=(6,2))
+
         # Hyperparameters panel (read-only labels)
         tk.Label(side_frame, text='Hyperparameters', font=(None, 12, 'bold')).pack(pady=(8,4))
         self._hyper_frame = tk.Frame(side_frame)
@@ -133,6 +137,25 @@ class EpisodeProgressDisplay:
         # run counters
         self._finished_episodes = 0
         self._total_episodes = int(total_episodes) if total_episodes is not None else None
+        
+        # Performance optimization settings
+        self._max_display_points = 1000  # Max points to show in plots
+        self._scatter_threshold = 200  # Use scatter only if fewer points than this
+        self._plot_update_interval = 5  # Update plots every N episodes for large datasets
+        self._episodes_since_plot_update = 0
+        
+        # Aggregation settings for high episode counts
+        self._aggregation_window = 100  # Aggregate every 100 episodes
+        self._aggregation_threshold = 500  # Start aggregating when exceeding this many episodes
+        
+        # Aggregated data (win rate, episode length, random clicks, rewards per 100 episodes)
+        self._aggregated_windows = []  # List of (window_num, avg_win_rate, avg_length, avg_randoms, avg_reward)
+        self._current_window_data = {  # Current 100-episode window being accumulated
+            'wins': [],
+            'lengths': [],
+            'randoms': [],
+            'rewards': []
+        }
 
     def _apply_update(self, info: dict):
         """Apply update on the GUI thread (internal)."""
@@ -178,39 +201,206 @@ class EpisodeProgressDisplay:
         self.reward_record.append(reward)
         self.random_click_record.append(random_clicks)
         self.win_record.append(1 if win else 0)
+        
+        # Handle aggregation for large datasets
+        total_episodes = len(self.episode_length_record)
 
         episodes = list(range(1, len(self.episode_length_record) + 1))
 
+        # Performance optimization: only update plots periodically for large datasets
+        self._episodes_since_plot_update += 1
+        total_episodes = len(self.episode_length_record)
+        
+        # Determine if we should update plots this iteration
+        should_update_plots = (
+            total_episodes <= 100 or  # Always update for small datasets
+            self._episodes_since_plot_update >= self._plot_update_interval or  # Periodic updates
+            total_episodes == self._total_episodes  # Always update on final episode
+        )
+        
+        if not should_update_plots:
+            # Skip plot update but still update summary stats
+            self._update_summary_stats()
+            return
+        
+        self._episodes_since_plot_update = 0  # Reset counter
+
+        # Get plot data (either individual episodes or aggregated windows)
+        all_episodes, all_lengths, all_rewards, all_randoms, all_wins, is_aggregated = self._get_plot_data()
+        
+        # Apply downsampling only if not using aggregated data
+        if not is_aggregated:
+            display_episodes, display_lengths, display_rewards, display_randoms, display_wins = self._downsample_data(
+                all_episodes, 
+                all_lengths, 
+                all_rewards, 
+                all_randoms, 
+                all_wins
+            )
+        else:
+            # Already downsampled via aggregation
+            display_episodes, display_lengths, display_rewards, display_randoms, display_wins = (
+                all_episodes, all_lengths, all_rewards, all_randoms, all_wins
+            )
+
         # update plots
         try:
+            # Determine if we should use scatter (expensive) or just lines
+            use_scatter = (not is_aggregated) and (len(display_episodes) <= self._scatter_threshold)
+
+            colors = ['#11f54e' if w else 'red' for w in display_wins] if use_scatter else None
+            
+            # Determine axis labels based on data type
+            if is_aggregated:
+                ep_label_suffix = " (100-ep windows)"
+                win_title = "Win Rate / 100"
+                len_title = "Avg Episode Length / 100"
+                reward_title = "Avg Reward / 100"
+                random_title = "Avg Random Clicks / 100"
+            else:
+                ep_label_suffix = ""
+                win_title = "Individual Episodes"
+                len_title = "Episode Length"
+                reward_title = "Reward"
+                random_title = "Random Clicks"
+            
             self.ax_len.clear()
-            self.ax_len.plot(episodes, self.episode_length_record, color='0.75', linewidth=1)
-            colors = ['#11f54e' if w else 'red' for w in self.win_record]
-            self.ax_len.scatter(episodes, self.episode_length_record, c=colors, edgecolors='k')
-            self.ax_len.set_ylabel('Episode length')
+            self.ax_len.plot(display_episodes, display_lengths, color='0.75', linewidth=1)
+            if use_scatter:
+                self.ax_len.scatter(display_episodes, display_lengths, c=colors, edgecolors='k', s=20)
+            self.ax_len.set_ylabel(len_title)
+            self.ax_len.grid(True, alpha=0.3)
 
             self.ax_win.clear()
-            self.ax_win.bar(['Lose', 'Win'], [len(self.win_record) - sum(self.win_record), sum(self.win_record)], color=['red','green'])
-            self.ax_win.set_ylabel('Count')
+            if is_aggregated:
+                self.ax_win.plot(display_episodes, display_wins, color='green', linewidth=1.5)
+                self.ax_win.set_ylim(0, 100)
+                self.ax_win.set_ylabel('Win rate (%)')
+                self.ax_win.set_title(win_title, fontsize=7)
+            else:
+                total_wins = sum(self.win_record)
+                total_losses = len(self.win_record) - total_wins
+                self.ax_win.bar(['Lose', 'Win'], [total_losses, total_wins], color=['red','green'])
+                self.ax_win.set_ylabel('Count')
+                self.ax_win.set_title(win_title, fontsize=9)
+            self.ax_win.grid(True, alpha=0.3)
 
             self.ax_reward.clear()
-            self.ax_reward.plot(episodes, self.reward_record, color='0.75', linewidth=1)
-            self.ax_reward.scatter(episodes, self.reward_record, c=colors, edgecolors='k')
-            self.ax_reward.set_ylabel('Reward')
+            self.ax_reward.plot(display_episodes, display_rewards, color='0.75', linewidth=1)
+            if use_scatter:
+                self.ax_reward.scatter(display_episodes, display_rewards, c=colors, edgecolors='k', s=20)
+            self.ax_reward.set_ylabel(reward_title)
+            self.ax_reward.grid(True, alpha=0.3)
 
             self.ax_random.clear()
-            self.ax_random.plot(episodes, self.random_click_record, color='0.75', linewidth=1)
-            self.ax_random.scatter(episodes, self.random_click_record, c=colors, edgecolors='k')
-            self.ax_random.set_ylabel('Random clicks')
-            self.ax_random.set_xlabel('Episode')
+            self.ax_random.plot(display_episodes, display_randoms, color='0.75', linewidth=1)
+            if use_scatter:
+                self.ax_random.scatter(display_episodes, display_randoms, c=colors, edgecolors='k', s=20)
+            self.ax_random.set_ylabel(random_title)
+            self.ax_random.set_xlabel(f'Episode{ep_label_suffix}')
+            self.ax_random.grid(True, alpha=0.3)
 
+            self.fig.tight_layout()
             self.canvas.draw_idle()
         except Exception:
             pass
 
         # update side labels
+        self._update_summary_stats()
+
+    def _accumulate_aggregation(self, win, length, random_clicks, reward, total_episodes):
+        """Accumulate data into 100-episode windows for large datasets."""
+        # Add current episode to current window
+        self._current_window_data['wins'].append(1 if win else 0)
+        self._current_window_data['lengths'].append(length if length is not None else 0)
+        self._current_window_data['randoms'].append(random_clicks)
+        self._current_window_data['rewards'].append(reward)
+        
+        # Check if current window is complete (100 episodes)
+        if len(self._current_window_data['wins']) >= self._aggregation_window:
+            # Calculate averages for this window
+            avg_win_rate = (sum(self._current_window_data['wins']) / len(self._current_window_data['wins'])) * 100
+            avg_length = sum(self._current_window_data['lengths']) / len(self._current_window_data['lengths'])
+            avg_randoms = sum(self._current_window_data['randoms']) / len(self._current_window_data['randoms'])
+            avg_reward = sum(self._current_window_data['rewards']) / len(self._current_window_data['rewards'])
+            
+            # Store aggregated window (window number starts at 1, representing episodes 1-100, 101-200, etc)
+            window_num = len(self._aggregated_windows) + 1
+            self._aggregated_windows.append((window_num, avg_win_rate, avg_length, avg_randoms, avg_reward))
+            
+            # Reset for next window
+            self._current_window_data = {'wins': [], 'lengths': [], 'randoms': [], 'rewards': []}
+    
+    def _get_plot_data(self):
+        """Get data to plot: individual episodes for small datasets, aggregated for large.
+        
+        Returns:
+            (episodes, lengths, rewards, randoms, wins, use_aggregated)
+        """
+        total_episodes = len(self.episode_length_record)
+        
+        # Use aggregated data if we're above threshold, computed from full history
+        if total_episodes >= self._aggregation_threshold:
+            windows_nums = []
+            win_rates = []
+            lengths = []
+            randoms = []
+            rewards = []
+
+            window = max(1, int(self._aggregation_window))
+            for start in range(0, total_episodes, window):
+                end = min(start + window, total_episodes)
+                chunk_wins = self.win_record[start:end]
+                chunk_lengths = self.episode_length_record[start:end]
+                chunk_randoms = self.random_click_record[start:end]
+                chunk_rewards = self.reward_record[start:end]
+
+                if not chunk_wins:
+                    continue
+
+                # x-axis uses the ending episode number of each window
+                windows_nums.append(end)
+                win_rates.append((sum(chunk_wins) / len(chunk_wins)) * 100.0)
+                lengths.append(sum(chunk_lengths) / len(chunk_lengths))
+                randoms.append(sum(chunk_randoms) / len(chunk_randoms))
+                rewards.append(sum(chunk_rewards) / len(chunk_rewards))
+
+            return windows_nums, lengths, rewards, randoms, win_rates, True
+        else:
+            # Use individual episodes
+            episodes = list(range(1, total_episodes + 1))
+            return episodes, self.episode_length_record, self.reward_record, self.random_click_record, self.win_record, False
+
+    def _downsample_data(self, episodes, lengths, rewards, randoms, wins):
+        """Downsample data for efficient plotting with large datasets.
+        
+        Uses a sliding window approach: shows most recent episodes up to max_display_points.
+        For very large datasets, applies additional intelligent downsampling.
+        """
+        n = len(episodes)
+        
+        # If dataset is small enough, return as-is
+        if n <= self._max_display_points:
+            return episodes, lengths, rewards, randoms, wins
+        
+        # Use sliding window: show most recent episodes
+        start_idx = n - self._max_display_points
+        
+        return (
+            episodes[start_idx:],
+            lengths[start_idx:],
+            rewards[start_idx:],
+            randoms[start_idx:],
+            wins[start_idx:]
+        )
+    
+    def _update_summary_stats(self):
+        """Update the summary statistics labels on the side panel."""
         try:
             n = len(self.win_record)
+            if n == 0:
+                return
+            
             win_rate = (sum(self.win_record) / n * 100.0) if n else 0.0
             avg_random = (sum(self.random_click_record) / n) if n else 0.0
             avg_length = (sum(self.episode_length_record) / n) if n else 0.0
@@ -346,6 +536,34 @@ class EpisodeProgressDisplay:
                 self.episodes_label.config(text=text)
             except Exception:
                 pass
+
+    def set_save_status(self, enabled: bool, message: str = None):
+        """Update save status label with color coding.
+        
+        Args:
+            enabled: True if save was enabled, False if disabled
+            message: Additional status message (e.g., filename or error)
+        """
+        try:
+            if not enabled:
+                text = "Save status: Disable"
+                color = 'red'
+            elif message:
+                text = f"Save status: Enable - {message}"
+                color = 'green'
+            else:
+                text = "Save status: Enable"
+                color = 'green'
+            
+            def _update():
+                try:
+                    self.save_status_label.config(text=text, fg=color)
+                except Exception:
+                    pass
+            
+            self.window.after(0, _update)
+        except Exception:
+            pass
 
     def run(self):
         """Start the Tkinter main loop. Blocks."""
