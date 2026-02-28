@@ -28,6 +28,8 @@ This reward function is designed for the Hybrid agent, where deterministic rules
 
 Since rule-based actions never cause a loss, the agent is incentivized to reveal cells that expand the board and enable further safe rule application. The reward therefore promotes exploration that increases the solvable region of the board.
 
+(The effect of this reward function has no yet been tested, as training agent takes longer than I expected, will update if this is good or bad when the training and testing is done)
+
 To modify the terminal award, simply go to `config.py` to change the value.
 
 For modification to reward function, check out `step()` function in `MSEnv` class in `Game.py` 
