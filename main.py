@@ -453,6 +453,14 @@ class App:
 
         # create a per-run EpisodeProgressDisplay and composite progress callback
         ep_display = self._create_episode_display(agent_name, run_kwargs.get('difficulty'), episodes)
+        
+        # Set initial save status at the beginning of the run
+        try:
+            save_enabled = self._save_agent_var.get()
+            if ep_display is not None:
+                ep_display.set_save_status(save_enabled)
+        except Exception:
+            pass
 
         def _progress_cb(info):
             try:
@@ -508,6 +516,24 @@ class App:
         # let the agent run multiple episodes and provide per-episode progress
         results = agent.run_num_episodes(int(episodes), progress_update=_composite_progress, **run_kwargs)
 
+        # Save agent if checkbox is enabled and agent supports saving
+        save_enabled = False
+        save_msg = None
+        try:
+            difficulty = run_kwargs.get('difficulty', 'beginner')
+            agent_name_label = run_kwargs.get('agent_name', 'Agent')
+            save_enabled, save_msg = self._save_trained_agent(agent, results, difficulty, agent_name_label)
+            # Update episode display with save status if available
+            if ep_display is not None:
+                try:
+                    ep_display.set_save_status(save_enabled, save_msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error in _save_trained_agent: {e}")
+            import traceback
+            traceback.print_exc()
+
         final_state = None
         if isinstance(results, list) and results:
             final_state = results[-1].get('final_state') if isinstance(results[-1], dict) else None
@@ -538,6 +564,14 @@ class App:
 
         # create per-run EpisodeProgressDisplay on the GUI thread
         ep_display = self._create_episode_display(agent_name, difficulty, episodes)
+        
+        # Set initial save status at the beginning of the run
+        try:
+            save_enabled = self._save_agent_var.get()
+            if ep_display is not None:
+                ep_display.set_save_status(save_enabled)
+        except Exception:
+            pass
 
         # start Playwright and run the agent
         playwright = None
@@ -647,6 +681,22 @@ class App:
                 results = agent.run_num_episodes(episodes, difficulty=difficulty, max_steps=max_steps, delay=delay, progress_update=progress_cb)
             except Exception as e:
                 results = [{'error': str(e)}]
+
+            # Save agent if checkbox is enabled and agent supports saving
+            save_enabled = False
+            save_msg = None
+            try:
+                save_enabled, save_msg = self._save_trained_agent(agent, results, difficulty, agent_name)
+                # Update episode display with save status if available
+                if ep_display is not None:
+                    try:
+                        ep_display.set_save_status(save_enabled, save_msg)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Error in _save_trained_agent: {e}")
+                import traceback
+                traceback.print_exc()
 
             # prepare final result and schedule final UI update/cleanup on GUI thread
             final_state = None
@@ -1087,6 +1137,71 @@ class App:
             
         except Exception as e:
             pass
+    def _calculate_metrics(self, results):
+        """Calculate training metrics from results list."""
+        if not isinstance(results, list) or len(results) == 0:
+            return {'win_rate': 0.0, 'avg_reward': 0.0, 'avg_steps': 0.0}
+        
+        wins = sum(1 for r in results if isinstance(r, dict) and r.get('done', False))
+        total_reward = sum(r.get('reward', 0) for r in results if isinstance(r, dict))
+        total_steps = sum(r.get('steps', 0) for r in results if isinstance(r, dict))
+        n = len(results)
+        
+        return {
+            'win_rate': (wins / n * 100.0) if n else 0.0,
+            'avg_reward': total_reward / n if n else 0.0,
+            'avg_steps': total_steps / n if n else 0.0
+        }
+
+    def _save_trained_agent(self, agent, results, difficulty, agent_name):
+        """Save trained agent checkpoint after training completes.
+        
+        Returns: (enabled: bool, message: str) tuple
+        - enabled: whether save was enabled
+        - message: status message (filename on success, error on failure)
+        
+        Handles both main thread and worker thread contexts.
+        """
+        # Only save RL agents (Random/Baseline don't have save_checkpoint)
+        if not hasattr(agent, 'save_checkpoint'):
+            return (False, "Agent type does not support saving")
+        
+        # Check if save is enabled
+        save_enabled = False
+        try:
+            save_enabled = self._save_agent_var.get()
+        except Exception:
+            pass
+        
+        if not save_enabled:
+            return (False, "Save disabled")
+        
+        try:
+            import os
+            import torch
+            import datetime
+            
+            # Create checkpoints directory if it doesn't exist
+            checkpoint_dir = 'checkpoints'
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            
+            # Generate unique filename with timestamp
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            agent_class = agent.__class__.__name__
+            filename = f"{agent_class}_{difficulty}_{timestamp}.pth"
+            filepath = os.path.join(checkpoint_dir, filename)
+            
+            # Call agent's save_checkpoint with full path and difficulty
+            agent.save_checkpoint(filepath, difficulty=difficulty)
+            
+            return (True, f"Saved to {filename}")
+            
+        except Exception as e:
+            error_msg = f"Save failed: {str(e)}"
+            print(f"[DEBUG] {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return (True, error_msg)  # Return enabled=True but with error message
 
     def _run_saved_agent(self):
         """Load saved agent checkpoint and run it with checkpoint settings."""
@@ -1319,6 +1434,17 @@ class App:
         self._test_episodes_entry = tk.Entry(test_select, width=6)
         self._test_episodes_entry.insert(0, "0")
         self._test_episodes_entry.pack(side='left', padx=(6,0))
+        
+        # Save agent checkbox (between episodes and hyperparameters)
+        save_frame = tk.Frame(self.sidebar)
+        save_frame.pack(fill='x', pady=(6,4))
+        self._save_agent_var = tk.BooleanVar(value=False)
+        save_check = tk.Checkbutton(
+            save_frame, 
+            text="Save agent after training", 
+            variable=self._save_agent_var
+        )
+        save_check.pack(anchor='w', padx=2)
         
         # Hyperparameters panel (only affects upcoming RL/Hybrid agent)
         hp_frame = tk.LabelFrame(self.sidebar, text="Hyperparameters", padx=4, pady=4)

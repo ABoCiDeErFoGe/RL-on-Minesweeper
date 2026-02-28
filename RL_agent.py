@@ -102,7 +102,7 @@ class RL_agent(agent_interface):
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.LR, amsgrad=True)
-        self.memory = ReplayMemory(10000)
+        self.memory = ReplayMemory(40000)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy_net.to(self.device)
@@ -125,7 +125,7 @@ class RL_agent(agent_interface):
             "LR": self.LR,
         }
 
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, difficulty: str = 'beginner') -> None:
         """Save model + optimizer state and agent config to `path`."""
         checkpoint = {
             "agent_class": self.__class__.__name__,
@@ -133,7 +133,7 @@ class RL_agent(agent_interface):
             "target_state": self.target_net.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "steps_done": self.steps_done,
-            "difficulty": self.env.game.difficulty,
+            "difficulty": difficulty,
             "config": self.get_config_dict(),
             "agent_class": self.__class__.__name__,
         }
@@ -491,9 +491,9 @@ class DQNAgent(RL_agent):
         return {"steps": steps, "reward": total_reward, "done": bool(done), "history": history, "final_state": state, "random_clicks": "None", 'win': info.get('win', False)}
 
     # Expose checkpoint helpers on the concrete agent class
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, difficulty: str = 'beginner') -> None:
         """Save agent checkpoint (policy, target, optimizer, steps, config)."""
-        super().save_checkpoint(path + "_pure_rl" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pth")
+        super().save_checkpoint(path + "_pure_rl" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pth", difficulty=difficulty)
 
     def load_checkpoint(self, path: str, map_location=None) -> None:
         """Load agent checkpoint and restore networks/optimizer/steps."""
@@ -663,9 +663,9 @@ class Hybrid_Agent(RL_agent):
     # run_num_episodes inherited from agent_interface
 
     # Expose checkpoint helpers on the concrete agent class
-    def save_checkpoint(self, path: str) -> None:
+    def save_checkpoint(self, path: str, difficulty: str = 'beginner') -> None:
         """Save agent checkpoint (policy, target, optimizer, steps, config)."""
-        super().save_checkpoint(path + "_hybrid_" + datetime.now().strftime("%Y%m%d_%H%M%S")+".pth")
+        super().save_checkpoint(path + "_hybrid_" + datetime.now().strftime("%Y%m%d_%H%M%S")+".pth", difficulty=difficulty)
 
     def load_checkpoint(self, path: str, map_location=None) -> None:
         """Load agent checkpoint and restore networks/optimizer/steps."""
